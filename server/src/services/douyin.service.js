@@ -29,11 +29,25 @@ class DouyinService {
       }
       console.log(`[Douyin] Cache MISS: ${cacheKey}`);
 
-      // 调用宿主机 f2 解析服务拿视频信息（含无水印直链）
-      const resp = await axios.get(`${RESOLVER_HOST}/parse`, {
-        params: { url },
-        timeout: 120000,
-      });
+      // 调用抖音解析服务拿视频信息（含无水印直链）
+      // 抖音解析依赖独立的解析服务（f2 + 抖音登录 cookie），通过环境变量 DOUYIN_RESOLVER_HOST 指定。
+      // 未配置或服务不可用时，返回明确提示而不是笼统的 500，方便定位问题。
+      let resp;
+      try {
+        resp = await axios.get(`${RESOLVER_HOST}/parse`, {
+          params: { url },
+          timeout: 120000,
+        });
+      } catch (e) {
+        const connErr = e.code === 'ECONNREFUSED' || e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
+        const msg = connErr
+          ? `抖音解析服务不可用（${RESOLVER_HOST}）。请配置 DOUYIN_RESOLVER_HOST 指向可用的解析服务，部署方式见 README 或 docs/DOUYIN_RESOLVER.md`
+          : `抖音解析服务请求失败: ${e.message}`;
+        console.error(`[Douyin] 解析服务连接失败: ${e.code} ${e.message}`);
+        const error = new Error(msg);
+        error.status = 503;
+        throw error;
+      }
 
       if (resp.data.code !== 200 || !resp.data.data) {
         const msg = (resp.data && resp.data.message) || '解析服务返回异常';

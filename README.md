@@ -91,7 +91,7 @@ cd client && npm install
 | PORT | 否 | 3000 | 服务端口 |
 | MONGODB_URI | 是 | - | MongoDB连接地址 |
 | REDIS_URL | 否 | - | Redis连接地址（不配置则禁用缓存） |
-| DOUYIN_RESOLVER_HOST | 否 | http://localhost:3008 | 抖音解析宿主服务地址（默认本地3008端口，生产环境可指向专用解析服务） |
+| DOUYIN_RESOLVER_HOST | 否 | http://localhost:3008 | 抖音解析服务地址（**见下方说明**） |
 
 在 `server/` 目录下创建 `.env` 文件：
 
@@ -101,9 +101,17 @@ MONGODB_URI=mongodb://localhost:27017/wxtools
 REDIS_URL=redis://localhost:6379
 ```
 
-### 抖音解析服务（可选）
+### ⚠️ 抖音解析依赖说明
 
-抖音解析依赖一个独立的解析服务（负责获取无水印视频地址）。部署时可通过 `DOUYIN_RESOLVER_HOST` 环境变量指定该服务地址，默认指向 `http://localhost:3008`。如不需要抖音功能或使用其他方案，可忽略此配置。
+**抖音解析需要一个独立的解析服务**（因为抖音反爬严格，接口需要登录 cookie）。其他平台（B站/快手/小红书/PDF）**开箱即用**，不需要额外配置。
+
+- 如果不配置 `DOUYIN_RESOLVER_HOST`，抖音解析会返回"解析服务不可用"的提示，**不影响其他功能**
+- 完整部署教程见 [docs/DOUYIN_RESOLVER.md](./docs/DOUYIN_RESOLVER.md)
+
+```bash
+# 如果本地已启动解析服务（3008端口）
+export DOUYIN_RESOLVER_HOST="http://localhost:3008"
+```
 
 ### 启动服务
 

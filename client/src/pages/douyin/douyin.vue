@@ -207,8 +207,8 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue';
-import { onMounted, onShareAppMessage, onShareTimeline } from '@dcloudio/uni-app';
+import { ref, computed, onMounted } from 'vue';
+import { onShareAppMessage, onShareTimeline } from '@dcloudio/uni-app';
 import { parseDouyinUrl, getDouyinDownloadUrl, checkDouyinCookie, saveCookieLocal, getCookieLocal, clearCookieLocal } from '@/api/douyin';
 import request from '@/utils/request';
 

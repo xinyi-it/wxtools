@@ -59,22 +59,15 @@
           <view class="guide-step">
             <view class="step-num">3</view>
             <view class="step-content">
-              <text class="step-title">切换到 Application 标签</text>
-              <text class="step-desc">点击 Application（应用）标签页</text>
+              <text class="step-title">打开 Network 标签</text>
+              <text class="step-desc">在开发者工具里点击 Network（网络）标签页</text>
             </view>
           </view>
           <view class="guide-step">
             <view class="step-num">4</view>
             <view class="step-content">
-              <text class="step-title">找到 Cookies</text>
-              <text class="step-desc">左侧展开 Cookies，点击 https://www.douyin.com</text>
-            </view>
-          </view>
-          <view class="guide-step">
-            <view class="step-num">5</view>
-            <view class="step-content">
-              <text class="step-title">复制Cookie</text>
-              <text class="step-desc">选中全部 Cookie，复制为 cURL 格式或完整 Cookie 字符串</text>
+              <text class="step-title">找到请求的 Cookie</text>
+              <text class="step-desc">在抖音页面里随便点一个视频，点击 Network 里任意一个请求，在请求头的 Cookie 字段里复制完整 Cookie 字符串</text>
             </view>
           </view>
         </view>

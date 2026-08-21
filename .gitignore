@@ -66,3 +66,7 @@ coverage/
 *.temp
 .claude/
 client/.env.production
+
+# Python 编译缓存
+__pycache__/
+*.py[cod]

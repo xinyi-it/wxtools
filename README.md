@@ -191,18 +191,29 @@ node scripts/create-share-image.js
 ### Docker 快速部署
 
 ```bash
-# 使用 Docker Compose 一键部署
+# 使用 Docker Compose 一键部署（后端 + MongoDB + Redis + 抖音解析服务）
 docker-compose up -d --build
 
 # 查看服务状态
 docker-compose ps
 ```
 
+**抖音解析**：默认已集成，但需要你的抖音登录 cookie 才能工作（抖音反爬要求）。在 `docker-compose.yml` 同级创建 `.env` 文件：
+
+```env
+# 抖音登录 cookie（从浏览器 DevTools/Application/Cookies 复制 douyin.com 的 cookie）
+# 不填则抖音解析不可用，其他功能正常
+DOUYIN_COOKIE=sessionid=xxx; passport_csrf_token=xxx; ttwid=xxx
+```
+
+不配置 `DOUYIN_COOKIE` 时，抖音解析会返回"解析服务不可用"的提示，**不影响其他平台（B站/快手/小红书/PDF）**。
+
 ### Docker 服务说明
 
 | 服务 | 镜像 | 端口 | 说明 |
 |------|------|------|------|
 | server | 自建 | 3000 | Koa后端服务 |
+| douyin-resolver | 自建 | 3008 | 抖音解析服务（可选，需cookie） |
 | mongodb | mongo:7.0 | 27017(内部) | 数据库 |
 | redis | redis:7-alpine | 6379(内部) | 缓存服务 |
 

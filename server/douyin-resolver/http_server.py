@@ -9,7 +9,7 @@ import sys, json, re, subprocess, os, logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 PORT = 3008
-SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'douyin_resolve.py')
+SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resolve.py')
 PY = sys.executable
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')

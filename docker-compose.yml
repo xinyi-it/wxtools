@@ -37,11 +37,28 @@ services:
       - PORT=3000
       - MONGODB_URI=mongodb://mongodb:27017/wxtools
       - REDIS_URL=redis://redis:6379
+      - DOUYIN_RESOLVER_HOST=http://douyin-resolver:3008
     volumes:
       - uploads_data:/app/uploads
     depends_on:
       - mongodb
       - redis
+      - douyin-resolver
+    networks:
+      - wxtools-network
+
+  # 抖音解析服务（获取无水印视频地址）
+  # 依赖抖音登录 cookie，通过 DOUYIN_COOKIE 环境变量注入（可选，未配置则抖音解析不可用）
+  douyin-resolver:
+    build:
+      context: ./server/douyin-resolver
+      dockerfile: Dockerfile
+    container_name: wxtools-douyin-resolver
+    restart: always
+    ports:
+      - "3008:3008"
+    environment:
+      - DOUYIN_COOKIE=${DOUYIN_COOKIE:-}
     networks:
       - wxtools-network
 

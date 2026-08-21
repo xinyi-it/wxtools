@@ -74,9 +74,25 @@ docker run -d -p 3008:3008 \
 
 ## Cookie 说明
 
-- 解析服务通过 `browser-cookie3` 读取**本机 Chrome 的抖音登录 cookie**
-- 因此运行解析服务的机器需要满足：**Chrome 已安装 + 已登录抖音**
-- 没有有效 cookie 时，抖音接口会拒绝返回数据（解析失败）
+抖音解析需要登录 cookie（抖音反爬机制）。**两种提供方式**：
+
+1. **环境变量 `DOUYIN_COOKIE`（推荐，Docker 场景）**
+   ```bash
+   # 从浏览器 DevTools/Application/Cookies 复制 douyin.com 的 cookie
+   export DOUYIN_COOKIE="sessionid=xxx; passport_csrf_token=xxx; ttwid=xxx; ..."
+   docker run -d -p 3008:3008 -e "DOUYIN_COOKIE=$DOUYIN_COOKIE" douyin-resolver
+   ```
+
+2. **读取本机 Chrome**（本地跑场景）
+   - 确保 Chrome 已登录抖音
+   - 解析服务通过 `browser-cookie3` 自动读取
+
+**如何获取 cookie**：
+1. 用 Chrome 打开 https://www.douyin.com 并登录
+2. 按 F12 打开开发者工具 → Application → Cookies → https://www.douyin.com
+3. 复制需要的 cookie 值，拼接成 `name=value; name2=value2` 格式
+
+> ⚠️ cookie 是敏感信息，包含你的登录态。请勿泄露、不要提交到公开仓库。建议使用环境变量而非硬编码。
 
 ## 与 wxtools 后端对接
 

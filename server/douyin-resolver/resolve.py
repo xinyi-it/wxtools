@@ -8,7 +8,11 @@
 import sys, json, asyncio, re, traceback, urllib.parse
 
 def get_cookie():
-    """从 Chrome 读取 douyin cookie 字符串"""
+    """获取抖音 cookie，优先级：环境变量 DOUYIN_COOKIE > 本机 Chrome"""
+    import os
+    env_cookie = os.environ.get('DOUYIN_COOKIE', '').strip()
+    if env_cookie:
+        return env_cookie
     import browser_cookie3
     cj = browser_cookie3.chrome(domain_name='.douyin.com')
     names = ['sessionid','sessionid_ss','passport_csrf_token','passport_csrf_token_default',
@@ -16,7 +20,7 @@ def get_cookie():
              'n_mh','sid_guard','trusted_device_id','iid','d_ticket','s_v_web_id']
     pairs = [f'{c.name}={c.value}' for c in cj if c.name in names]
     if not pairs:
-        raise RuntimeError('未从Chrome获取到douyin cookie，请先登录抖音并关闭浏览器')
+        raise RuntimeError('未获取到douyin cookie。请通过 DOUYIN_COOKIE 环境变量提供，或先在Chrome登录抖音')
     return '; '.join(pairs)
 
 def extract_url(text: str) -> str:

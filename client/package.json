@@ -1,0 +1,27 @@
+{
+  "name": "wxtools-client",
+  "version": "1.0.0",
+  "description": "小程序工具箱前端",
+  "scripts": {
+    "dev:mp-weixin": "uni -p mp-weixin",
+    "build:mp-weixin": "uni build -p mp-weixin",
+    "dev:h5": "uni",
+    "build:h5": "uni build"
+  },
+  "dependencies": {
+    "@dcloudio/uni-app": "3.0.0-alpha-5000720260327001",
+    "@dcloudio/uni-components": "3.0.0-alpha-5000720260327001",
+    "@dcloudio/uni-h5": "3.0.0-alpha-5000720260327001",
+    "@dcloudio/uni-mp-weixin": "3.0.0-alpha-5000720260327001",
+    "vue": "^3.4.21"
+  },
+  "devDependencies": {
+    "@dcloudio/types": "^3.4.8",
+    "@dcloudio/uni-automator": "3.0.0-alpha-5000720260327001",
+    "@dcloudio/uni-cli-shared": "3.0.0-alpha-5000720260327001",
+    "@dcloudio/uni-stacktracey": "3.0.0-alpha-5000720260327001",
+    "@dcloudio/vite-plugin-uni": "3.0.0-alpha-5000720260327001",
+    "sharp": "^0.34.5",
+    "vite": "5.2.8"
+  }
+}

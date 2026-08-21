@@ -1,0 +1,47 @@
+{
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationBarTitleText": "工具箱",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/douyin/douyin",
+      "style": {
+        "navigationBarTitleText": "抖音去水印"
+      }
+    },
+    {
+      "path": "pages/pdf/pdf",
+      "style": {
+        "navigationBarTitleText": "PDF转图片"
+      }
+    },
+    {
+      "path": "pages/kuaishou/kuaishou",
+      "style": {
+        "navigationBarTitleText": "快手去水印"
+      }
+    },
+    {
+      "path": "pages/xiaohongshu/xiaohongshu",
+      "style": {
+        "navigationBarTitleText": "小红书下载"
+      }
+    },
+    {
+      "path": "pages/bilibili/bilibili",
+      "style": {
+        "navigationBarTitleText": "B站视频下载"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "工具箱",
+    "navigationBarBackgroundColor": "#ffffff",
+    "backgroundColor": "#f5f5f5"
+  }
+}

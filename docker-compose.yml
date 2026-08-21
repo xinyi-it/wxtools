@@ -1,0 +1,56 @@
+services:
+  # MongoDB 数据库
+  mongodb:
+    image: mongo:7.0
+    container_name: wxtools-mongodb
+    restart: always
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+    environment:
+      MONGO_INITDB_DATABASE: wxtools
+    networks:
+      - wxtools-network
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: wxtools-redis
+    restart: always
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - wxtools-network
+
+  # 后端服务
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: wxtools-server
+    restart: always
+    ports:
+      - "3005:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - MONGODB_URI=mongodb://mongodb:27017/wxtools
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - wxtools-network
+
+volumes:
+  mongodb_data:
+  mongodb_config:
+  uploads_data:
+  redis_data:
+
+networks:
+  wxtools-network:
+    driver: bridge

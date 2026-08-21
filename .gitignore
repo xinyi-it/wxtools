@@ -12,7 +12,6 @@ build/
 .env
 .env.local
 .env.*.local
-
 # 日志文件
 logs/
 *.log
@@ -65,7 +64,6 @@ coverage/
 *.tmp
 *.temp
 .claude/
-client/.env.production
 
 # Python 编译缓存
 __pycache__/

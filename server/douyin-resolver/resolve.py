@@ -116,8 +116,9 @@ async def _resolve_redirect(short_url: str, headers: dict) -> str:
     return str(resp.url)
 
 async def check_cookie(cookie: str):
-    """验证抖音 cookie 是否有效，并返回用户信息（昵称等）
-    通过 passport/account/info/v2 接口获取当前登录用户信息"""
+    """验证抖音 cookie 是否有效，并返回用户真实昵称
+    流程：passport/account/info 拿 sec_user_id → user/profile/other 拿真实昵称（nickname）
+    """
     cookie = (cookie or '').strip()
     if not cookie:
         return {'valid': False, 'isLogin': False, 'message': '未提供 Cookie，请先填写', 'hasCookie': False}
@@ -127,26 +128,27 @@ async def check_cookie(cookie: str):
         'Referer': 'https://www.douyin.com/',
         'Cookie': cookie,
     }
-    # 抖音账户信息接口：有效登录 cookie 返回用户数据（name/user_id 等）
     async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
         try:
+            # 1. passport 接口拿 sec_user_id（有效 cookie 才能拿到）
             resp = await client.get('https://www.douyin.com/passport/account/info/v2/?device_platform=webapp&aid=6383')
             data = (resp.json().get('data') or {}) if resp.status_code == 200 else {}
-            name = data.get('name') or data.get('screen_name') or ''
+            sec_uid = str(data.get('sec_user_id') or '')
             user_id = str(data.get('user_id') or data.get('user_id_str') or '')
-            if name or user_id:
-                return {'valid': True, 'isLogin': True, 'message': 'Cookie 有效', 'hasCookie': True,
-                        'userName': name, 'userId': user_id}
-            # 兜底：用推荐流接口再验证一次（有效 cookie 能拿到视频列表）
-            feed = await client.get('https://www.douyin.com/aweme/v1/web/tab/feed/?device_platform=webapp&aid=6383&channel=channel_pc_web')
+            if not sec_uid:
+                return {'valid': False, 'isLogin': False, 'message': 'Cookie 无效或未登录', 'hasCookie': True}
+            # 2. 拉用户主页拿真实昵称
+            nickname = ''
             try:
-                items = feed.json().get('aweme_list') or []
+                profile = await client.get(f'https://www.douyin.com/aweme/v1/web/user/profile/other/?sec_user_id={sec_uid}&device_platform=webapp&aid=6383')
+                u = (profile.json().get('user') or {})
+                if isinstance(u, dict) and 'user' in u:
+                    u = u['user']
+                nickname = u.get('nickname') or ''
             except Exception:
-                items = []
-            if items:
-                return {'valid': True, 'isLogin': True, 'message': 'Cookie 有效', 'hasCookie': True,
-                        'userName': '', 'userId': ''}
-            return {'valid': False, 'isLogin': False, 'message': 'Cookie 无效或未登录', 'hasCookie': True}
+                nickname = ''
+            return {'valid': True, 'isLogin': True, 'message': 'Cookie 有效', 'hasCookie': True,
+                    'userName': nickname, 'userId': user_id, 'secUid': sec_uid}
         except Exception as e:
             return {'valid': False, 'isLogin': False, 'message': f'Cookie 检测失败: {e}', 'hasCookie': True}
 

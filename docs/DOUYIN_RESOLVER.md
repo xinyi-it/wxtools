@@ -14,38 +14,59 @@ wxtools 后端 (Koa)  ──DOUYIN_RESOLVER_HOST──>  解析服务 (f2 + cook
 - 解析服务内部用 f2 库 + 抖音登录 cookie 请求抖音接口，拿到无水印地址
 - 解析服务独立部署，可以是 Docker 容器、独立进程，甚至是另一台服务器
 
-## 快速启动（Docker 一键部署，推荐）
+## 解析服务代码已内置
 
-项目提供了带解析服务的 Docker Compose 配置。如果仓库内包含 `docker-compose.resolver.yml` 或相关配置，直接：
+**解析服务代码已包含在仓库中**：`server/douyin-resolver/`
+
+```
+server/douyin-resolver/
+├── resolve.py         # 核心解析逻辑（f2 + cookie）
+├── http_server.py     # HTTP 服务封装（暴露 /parse 接口）
+├── requirements.txt   # Python 依赖
+├── Dockerfile         # Docker 镜像构建
+└── README.md          # 解析服务单独说明
+```
+
+你不需要从零写解析服务，直接用仓库里的代码部署即可。
+
+## 快速启动（推荐：直接用仓库代码跑）
+
+### 方式一：本地 Python 直接跑
 
 ```bash
-# 方式一：如果已集成解析服务到主 compose
-docker-compose up -d --build
+# 1. 进入解析服务目录
+cd server/douyin-resolver
 
-# 方式二：如果解析服务独立（启动后用环境变量指向它）
-docker-compose -f docker-compose.yml -f docker-compose.resolver.yml up -d --build
+# 2. 安装依赖（建议虚拟环境）
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 3. 确保本机 Chrome 已登录抖音（解析需要 cookie）
+
+# 4. 启动服务（默认 3008 端口）
+python http_server.py 3008
+
+# 5. 测试
+curl "http://localhost:3008/health"
+curl "http://localhost:3008/parse?url=<抖音分享链接>"
 ```
 
-## 手动部署解析服务
+### 方式二：Docker
 
-### 方式 A：作为独立 HTTP 服务（Python）
+```bash
+# 构建镜像
+docker build -t douyin-resolver server/douyin-resolver
 
-解析服务是一个封装了 f2 的 HTTP 服务，暴露 `/parse?url=<分享链接>` 接口：
-
-```python
-# resolver_service.py（核心逻辑，见仓库 server/scripts/douyin_resolver/）
-# 依赖：pip install f2 browser-cookie3 httpx
-# 启动：python resolver_service.py 3008
+# 运行（挂载 Chrome 配置以便读取 cookie）
+docker run -d -p 3008:3008 \
+  -v ~/.config/google-chrome:/home/user/.config/google-chrome \
+  douyin-resolver
 ```
 
-关键点：
-- 需要**抖音登录 cookie**（`browser-cookie3` 从本机 Chrome 读取）
-- 因此解析服务要跑在**已登录抖音的 Chrome 所在的机器**上
-- 服务监听某个端口，如 `3008`
+### 方式三：直接在已登录抖音的机器上部署
 
-### 方式 B：复用现有 f2 CLI
-
-如果不想写 HTTP 服务，也可以直接用 f2 命令行，但需要 wxtools 后端配合修改（不推荐）。
+如果你有一台已用 Chrome 登录抖音的机器（Linux/Mac），直接在 `/parse` 需要时手动起解析服务即可。
 
 ## 配置 wxtools 后端
 

@@ -6,7 +6,40 @@ const CACHE_PREFIX = 'douyin';
 const RESOLVER_HOST = process.env.DOUYIN_RESOLVER_HOST || 'http://localhost:3008';
 
 class DouyinService {
-  async parseShareUrl(shareUrl) {
+  // 验证用户提供的抖音 Cookie 是否有效（不存储，各用户用自己的）
+  async checkCookieStatus(cookie) {
+    if (!cookie) {
+      return {
+        valid: false,
+        isLogin: false,
+        message: '未设置Cookie',
+        hasCookie: false,
+      };
+    }
+    try {
+      const resp = await axios.get(`${RESOLVER_HOST}/cookie/check`, {
+        params: { cookie },
+        timeout: 30000,
+      });
+      const data = (resp.data && resp.data.data) || {};
+      return {
+        valid: data.valid || false,
+        isLogin: data.isLogin || false,
+        message: data.message || 'Cookie检测失败',
+        hasCookie: true,
+      };
+    } catch (e) {
+      console.error(`[Douyin] Cookie检查失败: ${e.message}`);
+      return {
+        valid: false,
+        isLogin: false,
+        message: 'Cookie检测失败（解析服务不可用）',
+        hasCookie: true,
+      };
+    }
+  }
+
+  async parseShareUrl(shareUrl, userCookie = '') {
     try {
       console.log(`[Douyin] 原始输入: ${shareUrl}`);
 
@@ -20,8 +53,8 @@ class DouyinService {
       }
       console.log(`[Douyin] Extracted URL: ${url}`);
 
-      // 尝试从缓存获取
-      const cacheKey = `${CACHE_PREFIX}:parse:${md5(url)}`;
+      // 尝试从缓存获取（缓存 key 含 cookie 指纹，避免不同用户结果串用）
+      const cacheKey = `${CACHE_PREFIX}:parse:${md5(url + userCookie)}`;
       const cachedResult = await cache.get(cacheKey);
       if (cachedResult) {
         console.log(`[Douyin] Cache HIT: ${cacheKey}`);
@@ -30,12 +63,11 @@ class DouyinService {
       console.log(`[Douyin] Cache MISS: ${cacheKey}`);
 
       // 调用抖音解析服务拿视频信息（含无水印直链）
-      // 抖音解析依赖独立的解析服务（f2 + 抖音登录 cookie），通过环境变量 DOUYIN_RESOLVER_HOST 指定。
-      // 未配置或服务不可用时，返回明确提示而不是笼统的 500，方便定位问题。
+      // cookie 由用户提供（各用各的，避免服务级共享被封号），透传给解析服务。
       let resp;
       try {
         resp = await axios.get(`${RESOLVER_HOST}/parse`, {
-          params: { url },
+          params: { url, cookie: userCookie },
           timeout: 120000,
         });
       } catch (e) {

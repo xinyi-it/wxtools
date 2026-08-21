@@ -1,5 +1,118 @@
 <template>
   <view class="container">
+    <!-- Cookie配置区域（各用户用自己的cookie，避免共享被封号） -->
+    <view class="cookie-section">
+      <view class="section-header">
+        <view class="section-title">抖音登录状态</view>
+        <view class="status-indicator" :class="cookieStatus.isLogin ? 'status-valid' : 'status-invalid'">
+          <view class="status-dot"></view>
+          <text class="status-text">{{ cookieStatus.message || '检测中...' }}</text>
+        </view>
+      </view>
+
+      <!-- 未设置Cookie提示 -->
+      <view class="cookie-warning" v-if="!cookieStatus.isLogin">
+        <view class="warning-icon">🔑</view>
+        <view class="warning-text">
+          <text class="warning-title">需要抖音登录Cookie才能解析</text>
+          <text class="warning-desc">填写你自己的抖音Cookie，各用各的更安全（Cookie仅存本地，不上传服务器）</text>
+        </view>
+      </view>
+
+      <!-- 已设置状态 -->
+      <view class="cookie-info" v-if="cookieStatus.isLogin">
+        <text class="info-item quality">✅ Cookie有效，可正常解析</text>
+      </view>
+
+      <view class="cookie-actions">
+        <button class="btn-guide" @click="showGuide = true" v-if="!cookieStatus.isLogin">
+          获取Cookie指引
+        </button>
+        <button class="btn-check" @click="checkCookieStatus" :disabled="checkingCookie">
+          {{ checkingCookie ? '检测中...' : '检测状态' }}
+        </button>
+        <button class="btn-set" @click="showCookieInput = true">设置Cookie</button>
+        <button class="btn-clear" @click="clearCookie" v-if="cookieStatus.hasCookie">清除</button>
+      </view>
+    </view>
+
+    <!-- 获取Cookie指引弹窗 -->
+    <view class="modal-mask" v-if="showGuide" @click="showGuide = false">
+      <view class="modal-content guide-modal" @click.stop>
+        <view class="modal-title">获取抖音Cookie指引</view>
+        <view class="guide-steps">
+          <view class="guide-step">
+            <view class="step-num">1</view>
+            <view class="step-content">
+              <text class="step-title">打开抖音网页版</text>
+              <text class="step-desc">浏览器访问 www.douyin.com 并登录账号</text>
+            </view>
+          </view>
+          <view class="guide-step">
+            <view class="step-num">2</view>
+            <view class="step-content">
+              <text class="step-title">打开开发者工具</text>
+              <text class="step-desc">按 F12 或右键→检查，打开开发者工具</text>
+            </view>
+          </view>
+          <view class="guide-step">
+            <view class="step-num">3</view>
+            <view class="step-content">
+              <text class="step-title">切换到 Application 标签</text>
+              <text class="step-desc">点击 Application（应用）标签页</text>
+            </view>
+          </view>
+          <view class="guide-step">
+            <view class="step-num">4</view>
+            <view class="step-content">
+              <text class="step-title">找到 Cookies</text>
+              <text class="step-desc">左侧展开 Cookies，点击 https://www.douyin.com</text>
+            </view>
+          </view>
+          <view class="guide-step">
+            <view class="step-num">5</view>
+            <view class="step-content">
+              <text class="step-title">复制Cookie</text>
+              <text class="step-desc">选中全部 Cookie，复制为 cURL 格式或完整 Cookie 字符串</text>
+            </view>
+          </view>
+        </view>
+        <view class="guide-tip">
+          <text>💡 Cookie必须包含 sessionid 才能正常使用（需在浏览器登录抖音）</text>
+        </view>
+        <view class="modal-btns">
+          <button class="btn-confirm" @click="showGuide = false; showCookieInput = true">我知道了，去设置</button>
+        </view>
+      </view>
+    </view>
+
+    <!-- Cookie输入弹窗 -->
+    <view class="modal-mask" v-if="showCookieInput" @click="showCookieInput = false">
+      <view class="modal-content" @click.stop>
+        <view class="modal-title">设置抖音Cookie</view>
+        <view class="paste-btn-wrapper">
+          <button class="btn-paste-cookie" @click="pasteCookie" :disabled="savingCookie">
+            一键粘贴
+          </button>
+        </view>
+        <textarea
+          v-model="cookieInput"
+          class="cookie-input"
+          placeholder="请粘贴抖音Cookie（需包含sessionid）"
+          :maxlength="5000"
+        />
+        <view class="modal-tips">
+          <text>提示：Cookie仅存储在本地，各用户用自己的更安全</text>
+        </view>
+        <view class="modal-btns">
+          <button class="btn-cancel" @click="showCookieInput = false">取消</button>
+          <button class="btn-confirm" @click="saveCookie" :disabled="savingCookie">
+            {{ savingCookie ? '验证中...' : '保存并验证' }}
+          </button>
+        </view>
+      </view>
+    </view>
+
     <!-- 输入区域 -->
     <view class="input-section">
       <view class="section-title">粘贴抖音分享链接</view>
@@ -94,8 +207,8 @@
 
 <script setup>
 import { ref, computed } from 'vue';
-import { onShareAppMessage, onShareTimeline } from '@dcloudio/uni-app';
-import { parseDouyinUrl, getDouyinDownloadUrl } from '@/api/douyin';
+import { onMounted, onShareAppMessage, onShareTimeline } from '@dcloudio/uni-app';
+import { parseDouyinUrl, getDouyinDownloadUrl, checkDouyinCookie, saveCookieLocal, getCookieLocal, clearCookieLocal } from '@/api/douyin';
 import request from '@/utils/request';
 
 const shareUrl = ref('');
@@ -106,6 +219,125 @@ const saving = ref(false);
 const savingIndex = ref(0);
 const savingTotal = ref(0);
 const videoInfo = ref(null);
+
+// Cookie相关（各用户用自己的cookie，避免共享被封号）
+const showGuide = ref(false);
+const showCookieInput = ref(false);
+const cookieInput = ref('');
+const savingCookie = ref(false);
+const checkingCookie = ref(false);
+const localCookie = ref('');
+const cookieStatus = ref({
+  valid: false,
+  isLogin: false,
+  hasCookie: false,
+  message: '检测中...'
+});
+
+// 页面加载时检查本地Cookie
+onMounted(async () => {
+  localCookie.value = getCookieLocal();
+  if (localCookie.value) {
+    await checkCookieStatus();
+  } else {
+    cookieStatus.value = {
+      valid: false,
+      isLogin: false,
+      hasCookie: false,
+      message: '未设置Cookie'
+    };
+  }
+});
+
+// 检查Cookie状态
+const checkCookieStatus = async () => {
+  if (!localCookie.value) {
+    cookieStatus.value = {
+      valid: false,
+      isLogin: false,
+      hasCookie: false,
+      message: '未设置Cookie'
+    };
+    return;
+  }
+  checkingCookie.value = true;
+  cookieStatus.value.message = '检测中...';
+  try {
+    const res = await checkDouyinCookie(localCookie.value);
+    cookieStatus.value = res.data;
+  } catch (e) {
+    cookieStatus.value = {
+      valid: false,
+      isLogin: false,
+      hasCookie: true,
+      message: '检测失败'
+    };
+  } finally {
+    checkingCookie.value = false;
+  }
+};
+
+// 一键粘贴Cookie
+const pasteCookie = async () => {
+  try {
+    const res = await uni.getClipboardData();
+    cookieInput.value = res.data;
+    uni.showToast({ title: '已粘贴', icon: 'success' });
+  } catch (e) {
+    uni.showToast({ title: '粘贴失败', icon: 'none' });
+  }
+};
+
+// 保存Cookie到本地（先验证再保存）
+const saveCookie = async () => {
+  if (!cookieInput.value.trim()) {
+    uni.showToast({ title: '请输入Cookie', icon: 'none' });
+    return;
+  }
+  if (!cookieInput.value.includes('sessionid')) {
+    uni.showToast({ title: 'Cookie缺少sessionid', icon: 'none' });
+    return;
+  }
+  savingCookie.value = true;
+  try {
+    const res = await checkDouyinCookie(cookieInput.value.trim());
+    if (res.data.isLogin) {
+      localCookie.value = cookieInput.value.trim();
+      saveCookieLocal(localCookie.value);
+      cookieStatus.value = res.data;
+      showCookieInput.value = false;
+      cookieInput.value = '';
+      uni.showToast({ title: 'Cookie有效，可正常解析', icon: 'success' });
+    } else {
+      uni.showToast({ title: res.data.message || 'Cookie无效', icon: 'none' });
+    }
+  } catch (e) {
+    uni.showToast({ title: '验证失败', icon: 'none' });
+  } finally {
+    savingCookie.value = false;
+  }
+};
+
+// 清除本地Cookie
+const clearCookie = () => {
+  uni.showModal({
+    title: '确认清除',
+    content: '清除后将无法解析抖音视频，确定清除Cookie吗？',
+    success: (res) => {
+      if (res.confirm) {
+        clearCookieLocal();
+        localCookie.value = '';
+        cookieStatus.value = {
+          valid: false,
+          isLogin: false,
+          hasCookie: false,
+          message: '未设置Cookie'
+        };
+        uni.showToast({ title: '已清除', icon: 'success' });
+      }
+    }
+  });
+};
 
 // 分享给朋友
 onShareAppMessage(() => {
@@ -172,11 +404,16 @@ const parseUrl = async () => {
   loading.value = true;
 
   try {
-    const res = await parseDouyinUrl(shareUrl.value.trim());
+    const res = await parseDouyinUrl(shareUrl.value.trim(), localCookie.value);
     videoInfo.value = res.data;
     uni.showToast({ title: '解析成功', icon: 'success' });
   } catch (e) {
     console.error('解析失败:', e);
+    if (e?.message?.includes('未设置Cookie') || e?.message?.includes('Cookie')) {
+      uni.showToast({ title: '请先设置抖音Cookie', icon: 'none' });
+    } else {
+      uni.showToast({ title: '解析失败', icon: 'none' });
+    }
   } finally {
     loading.value = false;
   }
@@ -327,6 +564,292 @@ const saveAllImages = async () => {
 
 .section-header .section-title {
   margin-bottom: 0;
+}
+
+/* Cookie配置区域（抖音品牌红色） */
+.cookie-section {
+  background-color: #fff;
+  border-radius: 16rpx;
+  padding: 30rpx;
+  margin-bottom: 20rpx;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+}
+
+.status-dot {
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 50%;
+}
+
+.status-valid .status-dot {
+  background-color: #07c160;
+  box-shadow: 0 0 8rpx #07c160;
+}
+
+.status-invalid .status-dot {
+  background-color: #ff4d4f;
+  box-shadow: 0 0 8rpx #ff4d4f;
+}
+
+.status-text {
+  font-size: 24rpx;
+  color: #666;
+}
+
+/* 未登录警告 */
+.cookie-warning {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  padding: 16rpx;
+  background-color: #fff9e6;
+  border-radius: 12rpx;
+  margin-bottom: 20rpx;
+}
+
+.warning-icon {
+  font-size: 36rpx;
+}
+
+.warning-text {
+  flex: 1;
+}
+
+.warning-title {
+  font-size: 26rpx;
+  color: #ff9500;
+  font-weight: 500;
+}
+
+.warning-desc {
+  font-size: 22rpx;
+  color: #999;
+  display: block;
+  margin-top: 4rpx;
+}
+
+.cookie-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16rpx;
+  margin-bottom: 20rpx;
+}
+
+.info-item {
+  font-size: 24rpx;
+  color: #666;
+  background-color: #f5f5f5;
+  padding: 8rpx 16rpx;
+  border-radius: 8rpx;
+}
+
+.info-item.quality {
+  color: #07c160;
+  background-color: #f0fff5;
+}
+
+.cookie-actions {
+  display: flex;
+  gap: 16rpx;
+  flex-wrap: wrap;
+}
+
+.btn-guide {
+  flex: 1;
+  background-color: #ff9500;
+  color: #fff;
+  border: none;
+  border-radius: 8rpx;
+  padding: 16rpx;
+  font-size: 26rpx;
+}
+
+.btn-check {
+  flex: 1;
+  background-color: #f0f0f0;
+  color: #333;
+  border: none;
+  border-radius: 8rpx;
+  padding: 16rpx;
+  font-size: 26rpx;
+}
+
+.btn-set {
+  flex: 1;
+  background-color: #fe2c55;
+  color: #fff;
+  border: none;
+  border-radius: 8rpx;
+  padding: 16rpx;
+  font-size: 26rpx;
+}
+
+.btn-clear {
+  background-color: #f0f0f0;
+  color: #999;
+  border: none;
+  border-radius: 8rpx;
+  padding: 16rpx 24rpx;
+  font-size: 26rpx;
+}
+
+/* 弹窗样式 */
+.modal-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  width: 90%;
+  max-width: 600rpx;
+  background-color: #fff;
+  border-radius: 16rpx;
+  padding: 30rpx;
+}
+
+.modal-title {
+  font-size: 32rpx;
+  font-weight: 500;
+  color: #333;
+  text-align: center;
+  margin-bottom: 20rpx;
+}
+
+/* 指引弹窗 */
+.guide-modal {
+  max-width: 650rpx;
+}
+
+.guide-steps {
+  margin-bottom: 20rpx;
+}
+
+.guide-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 16rpx;
+  padding: 16rpx 0;
+  border-bottom: 1rpx solid #f0f0f0;
+}
+
+.guide-step:last-child {
+  border-bottom: none;
+}
+
+.step-num {
+  width: 40rpx;
+  height: 40rpx;
+  background-color: #fe2c55;
+  color: #fff;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24rpx;
+  font-weight: 500;
+}
+
+.step-content {
+  flex: 1;
+}
+
+.step-title {
+  font-size: 26rpx;
+  color: #333;
+  font-weight: 500;
+}
+
+.step-desc {
+  font-size: 22rpx;
+  color: #999;
+  display: block;
+  margin-top: 4rpx;
+}
+
+.guide-tip {
+  padding: 16rpx;
+  background-color: #f0fff5;
+  border-radius: 8rpx;
+  text-align: center;
+}
+
+.guide-tip text {
+  font-size: 24rpx;
+  color: #07c160;
+}
+
+/* Cookie输入弹窗 */
+.paste-btn-wrapper {
+  margin-bottom: 16rpx;
+}
+
+.btn-paste-cookie {
+  width: 100%;
+  background-color: #07c160;
+  color: #fff;
+  border: none;
+  border-radius: 8rpx;
+  padding: 16rpx;
+  font-size: 28rpx;
+}
+
+.cookie-input {
+  width: 100%;
+  height: 200rpx;
+  background-color: #f8f8f8;
+  border-radius: 12rpx;
+  padding: 20rpx;
+  font-size: 24rpx;
+  box-sizing: border-box;
+}
+
+.modal-tips {
+  margin-top: 16rpx;
+  text-align: center;
+}
+
+.modal-tips text {
+  font-size: 22rpx;
+  color: #999;
+}
+
+.modal-btns {
+  display: flex;
+  gap: 20rpx;
+  margin-top: 30rpx;
+}
+
+.btn-cancel {
+  flex: 1;
+  background-color: #f0f0f0;
+  color: #333;
+  border: none;
+  border-radius: 8rpx;
+  padding: 20rpx;
+  font-size: 28rpx;
+}
+
+.btn-confirm {
+  flex: 1;
+  background-color: #fe2c55;
+  color: #fff;
+  border: none;
+  border-radius: 8rpx;
+  padding: 20rpx;
+  font-size: 28rpx;
 }
 
 .copy-btn {

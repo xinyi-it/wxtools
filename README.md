@@ -95,9 +95,11 @@ docker-compose logs -f server
 - 健康检查：`curl http://localhost:3005/wxtools/api/menu/list`
 - 停止：`docker-compose down`
 
-**抖音解析**：默认已集成解析服务，只需在 `.env` 填 `DOUYIN_COOKIE`（抖音登录 cookie）。**不填则抖音返回"解析服务不可用"提示，不影响 B站/快手/小红书/PDF**。
+**抖音解析**：需要**用户填写自己的抖音 Cookie**（各用各的，避免服务级共享 cookie 被风控封号）。Cookie 仅存储在用户本地，不上传服务器持久化。
 
-> **macOS 注意**：抖音 cookie 用 `DOUYIN_COOKIE` 环境变量提供即可（浏览器登录抖音 → F12 → Application/Cookies → 复制整串 cookie）。macOS 无法自动读取本机 Chrome 的 cookie（keychain 加密机制不同）。
+> **用户如何设置 Cookie**：小程序内抖音页 → "获取Cookie指引" → 浏览器登录 douyin.com → F12 → Application → Cookies → 复制 douyin.com 的完整 Cookie 字符串 → 粘贴到小程序。Cookie 需包含 `sessionid`。
+
+> **macOS 开发者注意**：解析服务同样由用户传入 cookie（不再依赖服务端环境变量），macOS 无特殊限制。部署解析服务时无需再配 `DOUYIN_COOKIE` 环境变量。
 
 ### 方式二：本地开发
 

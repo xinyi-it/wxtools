@@ -4,9 +4,25 @@ const douyinService = require('../services/douyin.service');
 
 const router = new Router();
 
+// 检查用户抖音 Cookie 状态（不存储，各用户用自己的）
+router.post('/cookie/check', async (ctx) => {
+  const { cookie } = ctx.request.body;
+  if (!cookie) {
+    ctx.success({
+      valid: false,
+      isLogin: false,
+      message: '未设置Cookie',
+      hasCookie: false,
+    });
+    return;
+  }
+  const status = await douyinService.checkCookieStatus(cookie);
+  ctx.success(status);
+});
+
 // 解析抖音分享链接
 router.post('/parse', async (ctx) => {
-  const { url } = ctx.request.body;
+  const { url, cookie = '' } = ctx.request.body;
 
   const schema = Joi.object({
     url: Joi.string().required().messages({
@@ -22,7 +38,7 @@ router.post('/parse', async (ctx) => {
     return;
   }
 
-  const result = await douyinService.parseShareUrl(url);
+  const result = await douyinService.parseShareUrl(url, cookie);
   ctx.success(result);
 });
 

@@ -7,33 +7,38 @@
 """
 import sys, json, asyncio, re, traceback, urllib.parse
 
-def get_cookie():
-    """获取抖音 cookie，优先级：环境变量 DOUYIN_COOKIE > 本机 Chrome（仅 Linux/Windows）
+def get_cookie(user_cookie=''):
+    """获取抖音 cookie，优先级：用户传入 --cookie > 环境变量 DOUYIN_COOKIE > 本机 Chrome（仅 Linux/Windows）
 
     macOS 注意：Chrome cookie 用 keychain 加密，browser-cookie3 无法读取，
-    因此 macOS 必须通过环境变量 DOUYIN_COOKIE 提供 cookie。
+    因此 macOS 必须通过 --cookie 或环境变量 DOUYIN_COOKIE 提供 cookie。
     """
+    # 1. 用户传入的 cookie（最优先，各用户用自己的，避免服务级共享被封号）
+    user_cookie = (user_cookie or '').strip()
+    if user_cookie:
+        return user_cookie
+    # 2. 环境变量
     import os
     env_cookie = os.environ.get('DOUYIN_COOKIE', '').strip()
     if env_cookie:
         return env_cookie
-    # macOS 无法解密 Chrome cookie（keychain 加密机制不同），直接跳过
+    # 3. macOS 无法解密 Chrome cookie（keychain 加密机制不同），直接跳过
     if sys.platform == 'darwin':
-        raise RuntimeError('macOS 无法自动读取 Chrome cookie。请设置环境变量 DOUYIN_COOKIE（浏览器登录抖音后，从 DevTools/Application/Cookies 复制整串 cookie）')
+        raise RuntimeError('未提供抖音 cookie。请在解析时填写你的抖音 cookie（浏览器登录抖音后，从 DevTools/Application/Cookies 复制整串 cookie）')
     try:
         import browser_cookie3
     except ImportError:
-        raise RuntimeError('未设置 DOUYIN_COOKIE 环境变量，且未安装 browser-cookie3。请设置环境变量 DOUYIN_COOKIE 提供抖音登录 cookie')
+        raise RuntimeError('未提供 DOUYIN_COOKIE 或 --cookie，且未安装 browser-cookie3。请提供你的抖音登录 cookie')
     try:
         cj = browser_cookie3.chrome(domain_name='.douyin.com')
     except Exception as e:
-        raise RuntimeError(f'读取 Chrome cookie 失败（{e}）。请改用环境变量 DOUYIN_COOKIE 提供抖音登录 cookie')
+        raise RuntimeError(f'读取 Chrome cookie 失败（{e}）。请改用 --cookie 提供你的抖音登录 cookie')
     names = ['sessionid','sessionid_ss','passport_csrf_token','passport_csrf_token_default',
              'sid_tt','uid_tt','ttwid','odin_tt','passport_auth_status','passport_auth_status_ss',
              'n_mh','sid_guard','trusted_device_id','iid','d_ticket','s_v_web_id']
     pairs = [f'{c.name}={c.value}' for c in cj if c.name in names]
     if not pairs:
-        raise RuntimeError('未获取到douyin cookie。请通过 DOUYIN_COOKIE 环境变量提供，或先在Chrome登录抖音')
+        raise RuntimeError('未获取到douyin cookie。请通过 --cookie 或 DOUYIN_COOKIE 提供你的抖音登录 cookie')
     return '; '.join(pairs)
 
 def extract_url(text: str) -> str:
@@ -57,12 +62,12 @@ def extract_video_id(url: str):
     if m: return m.group(1)
     return None
 
-async def resolve(url: str):
+async def resolve(url: str, cookie: str = ''):
     from f2.apps.douyin.crawler import DouyinCrawler
     from f2.apps.douyin.model import PostDetail
     from f2.apps.douyin.filter import PostDetailFilter
 
-    cookie = get_cookie()
+    cookie = get_cookie(cookie)
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Referer': 'https://www.douyin.com/',
@@ -110,13 +115,69 @@ async def _resolve_redirect(short_url: str, headers: dict) -> str:
         resp = await client.get(short_url)
     return str(resp.url)
 
+async def check_cookie(cookie: str):
+    """验证抖音 cookie 是否有效（调用抖音用户信息接口，检查返回的用户数据是否非空）"""
+    cookie = (cookie or '').strip()
+    if not cookie:
+        return {'valid': False, 'isLogin': False, 'message': '未提供 Cookie，请先填写'}
+    import httpx
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://www.douyin.com/',
+        'Cookie': cookie,
+    }
+    # 抖音用户信息接口：有效登录 cookie 返回 data（含用户信息），无效时 data 为 null
+    async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
+        try:
+            resp = await client.get('https://www.douyin.com/aweme/v1/web/im/user/info/')
+            try:
+                data = resp.json().get('data')
+            except Exception:
+                data = None
+            if data:
+                # 有用户数据 → cookie 有效
+                uid = data.get('user') or data.get('uid') or ''
+                return {'valid': True, 'isLogin': True, 'message': 'Cookie 有效'}
+            return {'valid': False, 'isLogin': False, 'message': 'Cookie 无效或未登录'}
+        except Exception as e:
+            return {'valid': False, 'isLogin': False, 'message': f'Cookie 检测失败: {e}'}
+
 def main():
-    if len(sys.argv) < 2:
-        print(json.dumps({'ok': False, 'error': '用法: douyin_resolve.py <链接或ID>'}, ensure_ascii=False))
+    args = sys.argv[1:]
+    cookie = ''
+    check_only = False
+    # 解析 --cookie=<value> 和 --check-cookie
+    positional = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith('--cookie='):
+            cookie = a.split('=', 1)[1]
+        elif a == '--cookie':
+            i += 1
+            if i < len(args):
+                cookie = args[i]
+        elif a == '--check-cookie':
+            check_only = True
+        else:
+            positional.append(a)
+        i += 1
+
+    if check_only:
+        try:
+            result = asyncio.run(check_cookie(cookie))
+            print(json.dumps({'ok': True, 'data': result}, ensure_ascii=False))
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            print(json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False))
         return
-    url = sys.argv[1].strip()
+
+    if not positional:
+        print(json.dumps({'ok': False, 'error': '用法: resolve.py [--cookie=<cookies>] <链接或ID> 或 resolve.py --check-cookie [--cookie=<cookies>]'}, ensure_ascii=False))
+        return
+    url = positional[0].strip()
     try:
-        result = asyncio.run(resolve(url))
+        result = asyncio.run(resolve(url, cookie))
         print(json.dumps({'ok': True, 'data': result}, ensure_ascii=False))
     except Exception as e:
         traceback.print_exc(file=sys.stderr)

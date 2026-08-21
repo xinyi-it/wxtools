@@ -29,18 +29,20 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        from urllib.parse import urlparse, parse_qs
+        q = parse_qs(urlparse(self.path).query)
         if self.path.startswith('/parse'):
-            from urllib.parse import urlparse, parse_qs
-            q = parse_qs(urlparse(self.path).query)
             url = (q.get('url') or [''])[0].strip()
+            cookie = (q.get('cookie') or [''])[0].strip()
             if not url:
                 self._send_json(400, {'code': 400, 'message': '缺少 url 参数', 'data': None})
                 return
             try:
-                r = subprocess.run(
-                    [PY, SCRIPT, url],
-                    capture_output=True, text=True, timeout=120
-                )
+                args = [PY, SCRIPT]
+                if cookie:
+                    args += ['--cookie', cookie]
+                args.append(url)
+                r = subprocess.run(args, capture_output=True, text=True, timeout=120)
                 out = r.stdout.strip()
                 # 取最后一行 JSON
                 lines = [l for l in out.splitlines() if l.strip().startswith('{')]
@@ -67,6 +69,22 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(500, {'code': 500, 'message': result.get('error', '解析失败'), 'data': None})
             except subprocess.TimeoutExpired:
                 self._send_json(500, {'code': 500, 'message': '解析超时', 'data': None})
+            except Exception as e:
+                self._send_json(500, {'code': 500, 'message': f'内部错误: {e}', 'data': None})
+        elif self.path.startswith('/cookie/check'):
+            cookie = (q.get('cookie') or [''])[0].strip()
+            try:
+                args = [PY, SCRIPT, '--check-cookie']
+                if cookie:
+                    args += ['--cookie', cookie]
+                r = subprocess.run(args, capture_output=True, text=True, timeout=30)
+                out = r.stdout.strip()
+                lines = [l for l in out.splitlines() if l.strip().startswith('{')]
+                result = json.loads(lines[-1]) if lines else {'ok': False, 'error': out[-200:] or '无输出'}
+                if result.get('ok'):
+                    self._send_json(200, {'code': 200, 'message': 'success', 'data': result['data']})
+                else:
+                    self._send_json(500, {'code': 500, 'message': result.get('error', 'Cookie检测失败'), 'data': None})
             except Exception as e:
                 self._send_json(500, {'code': 500, 'message': f'内部错误: {e}', 'data': None})
         elif self.path == '/health':

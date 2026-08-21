@@ -21,6 +21,7 @@
 
       <!-- 已设置状态 -->
       <view class="cookie-info" v-if="cookieStatus.isLogin">
+        <text class="info-item" v-if="cookieStatus.userName">@{{ cookieStatus.userName }}</text>
         <text class="info-item quality">✅ Cookie有效，可正常解析</text>
       </view>
 

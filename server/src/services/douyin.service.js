@@ -26,7 +26,9 @@ class DouyinService {
         valid: data.valid || false,
         isLogin: data.isLogin || false,
         message: data.message || 'Cookie检测失败',
-        hasCookie: true,
+        hasCookie: data.hasCookie !== undefined ? data.hasCookie : true,
+        userName: data.userName || '',
+        userId: data.userId || '',
       };
     } catch (e) {
       console.error(`[Douyin] Cookie检查失败: ${e.message}`);

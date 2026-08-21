@@ -116,29 +116,39 @@ async def _resolve_redirect(short_url: str, headers: dict) -> str:
     return str(resp.url)
 
 async def check_cookie(cookie: str):
-    """验证抖音 cookie 是否有效（请求推荐流接口，能拿到 aweme_list 即有效）"""
+    """验证抖音 cookie 是否有效，并返回用户信息（昵称等）
+    通过 passport/account/info/v2 接口获取当前登录用户信息"""
     cookie = (cookie or '').strip()
     if not cookie:
-        return {'valid': False, 'isLogin': False, 'message': '未提供 Cookie，请先填写'}
+        return {'valid': False, 'isLogin': False, 'message': '未提供 Cookie，请先填写', 'hasCookie': False}
     import httpx
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
         'Referer': 'https://www.douyin.com/',
         'Cookie': cookie,
     }
-    # 抖音推荐流接口：有效 cookie 返回 aweme_list（含视频），无效 cookie 返回非 JSON 或空
+    # 抖音账户信息接口：有效登录 cookie 返回用户数据（name/user_id 等）
     async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
         try:
-            resp = await client.get('https://www.douyin.com/aweme/v1/web/tab/feed/?device_platform=webapp&aid=6383&channel=channel_pc_web')
+            resp = await client.get('https://www.douyin.com/passport/account/info/v2/?device_platform=webapp&aid=6383')
+            data = (resp.json().get('data') or {}) if resp.status_code == 200 else {}
+            name = data.get('name') or data.get('screen_name') or ''
+            user_id = str(data.get('user_id') or data.get('user_id_str') or '')
+            if name or user_id:
+                return {'valid': True, 'isLogin': True, 'message': 'Cookie 有效', 'hasCookie': True,
+                        'userName': name, 'userId': user_id}
+            # 兜底：用推荐流接口再验证一次（有效 cookie 能拿到视频列表）
+            feed = await client.get('https://www.douyin.com/aweme/v1/web/tab/feed/?device_platform=webapp&aid=6383&channel=channel_pc_web')
             try:
-                items = resp.json().get('aweme_list') or []
+                items = feed.json().get('aweme_list') or []
             except Exception:
                 items = []
             if items:
-                return {'valid': True, 'isLogin': True, 'message': 'Cookie 有效'}
-            return {'valid': False, 'isLogin': False, 'message': 'Cookie 无效或未登录'}
+                return {'valid': True, 'isLogin': True, 'message': 'Cookie 有效', 'hasCookie': True,
+                        'userName': '', 'userId': ''}
+            return {'valid': False, 'isLogin': False, 'message': 'Cookie 无效或未登录', 'hasCookie': True}
         except Exception as e:
-            return {'valid': False, 'isLogin': False, 'message': f'Cookie 检测失败: {e}'}
+            return {'valid': False, 'isLogin': False, 'message': f'Cookie 检测失败: {e}', 'hasCookie': True}
 
 def main():
     args = sys.argv[1:]

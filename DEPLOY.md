@@ -11,9 +11,9 @@
 ### 1. 上传项目到服务器
 
 ```bash
-# 方式一：Git克隆
+# 方式一：Git克隆（推荐）
 cd /var/www
-git clone https://gitee.com/xinyi-it/wxtools.git
+git clone https://github.com/xinyi-it/wxtools.git
 cd wxtools
 
 # 方式二：SCP上传
@@ -59,9 +59,9 @@ docker exec -it wxtools-server sh
 ## Nginx 配置
 
 ```nginx
-# API 接口代理
+# API 接口代理（默认端口 3005，见 docker-compose.yml 的 server.ports）
 location /wxtools/api {
-    proxy_pass http://127.0.0.1:3001;
+    proxy_pass http://127.0.0.1:3005;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection 'upgrade';
@@ -76,7 +76,7 @@ location /wxtools/api {
 
 # PDF图片静态文件代理
 location /wxtools/api/pdf/image/ {
-    proxy_pass http://127.0.0.1:3001/pdf/image/;
+    proxy_pass http://127.0.0.1:3005/pdf/image/;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -209,7 +209,7 @@ docker image prune -f
 docker-compose logs server
 
 # 检查端口占用
-netstat -tlnp | grep 3001
+netstat -tlnp | grep 3005
 ```
 
 ### MongoDB 连接失败
@@ -227,7 +227,7 @@ docker exec -it wxtools-mongodb mongosh
 1. 检查后端服务是否运行：
 ```bash
 docker-compose ps
-curl http://127.0.0.1:3001/wxtools/api/menu/list
+curl http://127.0.0.1:3005/wxtools/api/menu/list
 ```
 
 2. 检查 Nginx 配置：

@@ -68,13 +68,44 @@ wxtools/
 
 ## 🚀 快速开始
 
-### 环境要求
+> **推荐：Docker 一键部署**（无需本地装 Node/MongoDB/Redis，clone 后一条命令跑起来）
+
+### 🐳 方式一：Docker 一键部署（推荐）
+
+**前提**：已安装 [Docker](https://www.docker.com/) + Docker Compose（≥2.0）
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/xinyi-it/wxtools.git
+cd wxtools
+
+# 2. （可选）配置抖音 cookie，复制模板即可
+cp .env.example .env
+# 编辑 .env 填入 DOUYIN_COOKIE（不填也能跑，只是抖音不可用，其他平台正常）
+
+# 3. 一键启动全部服务（后端 + MongoDB + Redis + 抖音解析服务）
+docker-compose up -d --build
+
+# 4. 查看状态 / 日志
+docker-compose ps
+docker-compose logs -f server
+```
+
+- 后端地址：`http://localhost:3005`（可在 `.env` 的 `SERVER_PORT` 改）
+- 健康检查：`curl http://localhost:3005/wxtools/api/menu/list`
+- 停止：`docker-compose down`
+
+**抖音解析**：默认已集成解析服务，只需在 `.env` 填 `DOUYIN_COOKIE`（抖音登录 cookie）。**不填则抖音返回"解析服务不可用"提示，不影响 B站/快手/小红书/PDF**。
+
+### 方式二：本地开发
+
+#### 环境要求
 - Node.js >= 18
 - MongoDB >= 5.0
 - Redis >= 6.0 (可选，用于缓存)
 - npm 或 pnpm
 
-### 安装依赖
+#### 安装依赖
 
 ```bash
 # 后端
@@ -186,27 +217,7 @@ node scripts/create-share-image.js
 
 ## 🐳 部署
 
-详细部署文档请查看 [DEPLOY.md](./DEPLOY.md)
-
-### Docker 快速部署
-
-```bash
-# 使用 Docker Compose 一键部署（后端 + MongoDB + Redis + 抖音解析服务）
-docker-compose up -d --build
-
-# 查看服务状态
-docker-compose ps
-```
-
-**抖音解析**：默认已集成，但需要你的抖音登录 cookie 才能工作（抖音反爬要求）。在 `docker-compose.yml` 同级创建 `.env` 文件：
-
-```env
-# 抖音登录 cookie（从浏览器 DevTools/Application/Cookies 复制 douyin.com 的 cookie）
-# 不填则抖音解析不可用，其他功能正常
-DOUYIN_COOKIE=sessionid=xxx; passport_csrf_token=xxx; ttwid=xxx
-```
-
-不配置 `DOUYIN_COOKIE` 时，抖音解析会返回"解析服务不可用"的提示，**不影响其他平台（B站/快手/小红书/PDF）**。
+详细部署文档（Nginx、数据备份、更新流程、故障排查）请查看 [DEPLOY.md](./DEPLOY.md)
 
 ### Docker 服务说明
 

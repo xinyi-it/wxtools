@@ -2,7 +2,6 @@ services:
   # MongoDB 数据库
   mongodb:
     image: mongo:7.0
-    container_name: wxtools-mongodb
     restart: always
     volumes:
       - mongodb_data:/data/db
@@ -15,7 +14,6 @@ services:
   # Redis 缓存
   redis:
     image: redis:7-alpine
-    container_name: wxtools-redis
     restart: always
     command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
     volumes:
@@ -28,10 +26,9 @@ services:
     build:
       context: ./server
       dockerfile: Dockerfile
-    container_name: wxtools-server
     restart: always
     ports:
-      - "3005:3000"
+      - "${SERVER_PORT:-3005}:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
@@ -53,10 +50,9 @@ services:
     build:
       context: ./server/douyin-resolver
       dockerfile: Dockerfile
-    container_name: wxtools-douyin-resolver
     restart: always
     ports:
-      - "3008:3008"
+      - "${RESOLVER_PORT:-3008}:3008"
     environment:
       - DOUYIN_COOKIE=${DOUYIN_COOKIE:-}
     networks:

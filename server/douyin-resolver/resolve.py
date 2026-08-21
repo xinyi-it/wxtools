@@ -116,27 +116,25 @@ async def _resolve_redirect(short_url: str, headers: dict) -> str:
     return str(resp.url)
 
 async def check_cookie(cookie: str):
-    """验证抖音 cookie 是否有效（调用抖音用户信息接口，检查返回的用户数据是否非空）"""
+    """验证抖音 cookie 是否有效（请求推荐流接口，能拿到 aweme_list 即有效）"""
     cookie = (cookie or '').strip()
     if not cookie:
         return {'valid': False, 'isLogin': False, 'message': '未提供 Cookie，请先填写'}
     import httpx
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
         'Referer': 'https://www.douyin.com/',
         'Cookie': cookie,
     }
-    # 抖音用户信息接口：有效登录 cookie 返回 data（含用户信息），无效时 data 为 null
+    # 抖音推荐流接口：有效 cookie 返回 aweme_list（含视频），无效 cookie 返回非 JSON 或空
     async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
         try:
-            resp = await client.get('https://www.douyin.com/aweme/v1/web/im/user/info/')
+            resp = await client.get('https://www.douyin.com/aweme/v1/web/tab/feed/?device_platform=webapp&aid=6383&channel=channel_pc_web')
             try:
-                data = resp.json().get('data')
+                items = resp.json().get('aweme_list') or []
             except Exception:
-                data = None
-            if data:
-                # 有用户数据 → cookie 有效
-                uid = data.get('user') or data.get('uid') or ''
+                items = []
+            if items:
                 return {'valid': True, 'isLogin': True, 'message': 'Cookie 有效'}
             return {'valid': False, 'isLogin': False, 'message': 'Cookie 无效或未登录'}
         except Exception as e:

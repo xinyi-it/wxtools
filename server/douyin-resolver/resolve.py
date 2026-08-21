@@ -8,13 +8,26 @@
 import sys, json, asyncio, re, traceback, urllib.parse
 
 def get_cookie():
-    """获取抖音 cookie，优先级：环境变量 DOUYIN_COOKIE > 本机 Chrome"""
+    """获取抖音 cookie，优先级：环境变量 DOUYIN_COOKIE > 本机 Chrome（仅 Linux/Windows）
+
+    macOS 注意：Chrome cookie 用 keychain 加密，browser-cookie3 无法读取，
+    因此 macOS 必须通过环境变量 DOUYIN_COOKIE 提供 cookie。
+    """
     import os
     env_cookie = os.environ.get('DOUYIN_COOKIE', '').strip()
     if env_cookie:
         return env_cookie
-    import browser_cookie3
-    cj = browser_cookie3.chrome(domain_name='.douyin.com')
+    # macOS 无法解密 Chrome cookie（keychain 加密机制不同），直接跳过
+    if sys.platform == 'darwin':
+        raise RuntimeError('macOS 无法自动读取 Chrome cookie。请设置环境变量 DOUYIN_COOKIE（浏览器登录抖音后，从 DevTools/Application/Cookies 复制整串 cookie）')
+    try:
+        import browser_cookie3
+    except ImportError:
+        raise RuntimeError('未设置 DOUYIN_COOKIE 环境变量，且未安装 browser-cookie3。请设置环境变量 DOUYIN_COOKIE 提供抖音登录 cookie')
+    try:
+        cj = browser_cookie3.chrome(domain_name='.douyin.com')
+    except Exception as e:
+        raise RuntimeError(f'读取 Chrome cookie 失败（{e}）。请改用环境变量 DOUYIN_COOKIE 提供抖音登录 cookie')
     names = ['sessionid','sessionid_ss','passport_csrf_token','passport_csrf_token_default',
              'sid_tt','uid_tt','ttwid','odin_tt','passport_auth_status','passport_auth_status_ss',
              'n_mh','sid_guard','trusted_device_id','iid','d_ticket','s_v_web_id']

@@ -97,6 +97,8 @@ docker-compose logs -f server
 
 **抖音解析**：默认已集成解析服务，只需在 `.env` 填 `DOUYIN_COOKIE`（抖音登录 cookie）。**不填则抖音返回"解析服务不可用"提示，不影响 B站/快手/小红书/PDF**。
 
+> **macOS 注意**：抖音 cookie 用 `DOUYIN_COOKIE` 环境变量提供即可（浏览器登录抖音 → F12 → Application/Cookies → 复制整串 cookie）。macOS 无法自动读取本机 Chrome 的 cookie（keychain 加密机制不同）。
+
 ### 方式二：本地开发
 
 #### 环境要求

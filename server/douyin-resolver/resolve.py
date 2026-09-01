@@ -47,16 +47,22 @@ def extract_url(text: str) -> str:
     if m: return m.group(0)
     m = re.search(r'https?://www\.douyin\.com/video/(\d+)', text)
     if m: return 'https://www.douyin.com/video/' + m.group(1)
+    m = re.search(r'https?://www\.douyin\.com/note/(\d+)', text)
+    if m: return 'https://www.douyin.com/note/' + m.group(1)
     m = re.search(r'https?://www\.iesdouyin\.com/share/video/(\d+)', text)
     if m: return 'https://www.douyin.com/video/' + m.group(1)
+    m = re.search(r'https?://www\.iesdouyin\.com/share/slides/(\d+)', text)
+    if m: return 'https://www.douyin.com/note/' + m.group(1)
     if text.strip().startswith('http'): return text.strip()
     # 纯ID
     if text.strip().isdigit(): return 'https://www.douyin.com/video/' + text.strip()
     raise ValueError('无法提取抖音链接')
 
 def extract_video_id(url: str):
-    """从URL提取视频ID（短链需先解析重定向）"""
-    m = re.search(r'/video/(\d+)', url)
+    """从URL提取视频/图文ID（短链需先解析重定向）"""
+    m = re.search(r'/(?:video|note)/(\d+)', url)
+    if m: return m.group(1)
+    m = re.search(r'/share/slides/(\d+)', url)
     if m: return m.group(1)
     m = re.search(r'(?:modal_id|item_ids|aweme_id)=(\d+)', url)
     if m: return m.group(1)
@@ -84,28 +90,40 @@ async def resolve(url: str, cookie: str = ''):
             final_url = short
         aweme_id = extract_video_id(final_url)
         if not aweme_id:
-            raise RuntimeError(f'无法从链接提取视频ID: {final_url}')
+            raise RuntimeError(f'无法从链接提取视频/图文ID: {final_url}')
         # 2. 获取详情
         params = PostDetail(aweme_id=aweme_id)
         data = await crawler.fetch_post_detail(params)
         detail = PostDetailFilter(data)
-        # video_play_addr 是列表(多清晰度)，取第一个为主，保留全部
+        # aweme_type 68=图文笔记, 0=视频
+        aweme_type = getattr(detail, 'aweme_type', 0)
+        is_note = aweme_type == 68
+        # 视频：video_play_addr 是列表(多清晰度)，取第一个为主，保留全部
         vurls = detail.video_play_addr or []
         vurl = vurls[0] if vurls else ''
-        return {
+        # 图文：images 图片列表
+        images = [str(u) for u in (detail.images or [])]
+        base = {
             'id': aweme_id,
-            'type': 'video',
+            'type': 'images' if is_note else 'video',
             'title': detail.desc,
             'author': detail.nickname,
             'cover': detail.cover,
-            'videoUrl': vurl,
-            'videoUrls': vurls,
             'musicUrl': detail.music_play_url,
             'duration': detail.duration,
             'likes': detail.digg_count,
             'comments': detail.comment_count,
             'shares': detail.share_count,
         }
+        if is_note:
+            base['images'] = images
+            base['imageCount'] = len(images)
+            base['videoUrl'] = ''
+            base['videoUrls'] = []
+        else:
+            base['videoUrl'] = vurl
+            base['videoUrls'] = vurls
+        return base
     raise RuntimeError('解析失败：未获取到数据')
 
 async def _resolve_redirect(short_url: str, headers: dict) -> str:

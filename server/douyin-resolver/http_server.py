@@ -50,8 +50,9 @@ class Handler(BaseHTTPRequestHandler):
                 if result.get('ok'):
                     data = result['data']
                     # 转成 wxtools 原接口格式
+                    itype = data.get('type', 'video')
                     resp = {
-                        'type': 'video',
+                        'type': itype,
                         'title': data.get('title', ''),
                         'author': data.get('author', ''),
                         'cover': data.get('cover', ''),
@@ -64,6 +65,9 @@ class Handler(BaseHTTPRequestHandler):
                             'shares': data.get('shares', 0),
                         },
                     }
+                    if itype == 'images':
+                        resp['images'] = data.get('images', [])
+                        resp['imageCount'] = data.get('imageCount', 0)
                     self._send_json(200, {'code': 200, 'message': 'success', 'data': resp})
                 else:
                     self._send_json(500, {'code': 500, 'message': result.get('error', '解析失败'), 'data': None})

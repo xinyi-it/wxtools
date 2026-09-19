@@ -395,6 +395,14 @@ const parseUrl = async () => {
     return;
   }
 
+  // 解析前从本地存储重新同步一次 cookie —— 避免页面加载后
+  // cookie 被设置/更新了，但 localCookie 还是旧的空值，导致解析请求
+  // 不带 cookie（后端会读容器内 Chrome cookie 失败）。
+  const stored = getCookieLocal();
+  if (stored) {
+    localCookie.value = stored;
+  }
+
   loading.value = true;
 
   try {
@@ -403,10 +411,11 @@ const parseUrl = async () => {
     uni.showToast({ title: '解析成功', icon: 'success' });
   } catch (e) {
     console.error('解析失败:', e);
-    if (e?.message?.includes('未设置Cookie') || e?.message?.includes('Cookie')) {
+    if (e?.message?.includes('未设置Cookie') || e?.message?.includes('cookie') || e?.message?.includes('Cookie')) {
       uni.showToast({ title: '请先设置抖音Cookie', icon: 'none' });
+      cookieStatus.value.message = '未设置Cookie';
     } else {
-      uni.showToast({ title: '解析失败', icon: 'none' });
+      uni.showToast({ title: e?.message || '解析失败', icon: 'none' });
     }
   } finally {
     loading.value = false;

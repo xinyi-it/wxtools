@@ -45,7 +45,10 @@ services:
       - wxtools-network
 
   # 抖音解析服务（获取无水印视频地址）
-  # 依赖抖音登录 cookie，通过 DOUYIN_COOKIE 环境变量注入（可选，未配置则抖音解析不可用）
+  # 双通道：
+  #   主通道 —— 直连抖音 web 详情接口（快速，元数据全）
+  #   兜底   —— 接口被风控挡住时，转发到宿主机的浏览器兜底服务
+  #             （opencli 驱动本地 Chrome 读播放地址，见 docs/DOUYIN_BROWSER_FALLBACK.md）
   douyin-resolver:
     build:
       context: ./server/douyin-resolver
@@ -55,6 +58,13 @@ services:
       - "${RESOLVER_PORT:-3008}:3008"
     environment:
       - DOUYIN_COOKIE=${DOUYIN_COOKIE:-}
+      # 宿主机上的浏览器兜底服务（opencli + 本地 Chrome）
+      # ⚠️ 用 wxtools-network 的网关地址，不要用 host.docker.internal ——
+      #    后者在自定义 bridge 网络里会被解析成 docker0 的 172.17.0.1，
+      #    跨网段路由不通（实测 timeout）。网关 172.18.0.1 才是宿主机。
+      - DY_BROWSER_HOST=${DY_BROWSER_HOST:-http://172.18.0.1:3009}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - wxtools-network
 

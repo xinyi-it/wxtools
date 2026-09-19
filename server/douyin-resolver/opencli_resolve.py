@@ -66,8 +66,11 @@ def _run_opencli(args, timeout=90):
         r = subprocess.run([OPENCLI] + args, capture_output=True, text=True,
                            timeout=timeout, env=env)
         return (r.stdout or '') + (r.stderr or '')
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        # 超时也要把子进程杀掉，否则会堆积僵尸 opencli 进程
         return '__TIMEOUT__'
+    except Exception as e:
+        return f'__ERROR__ {e}'
 
 
 def _pick_source_json(out: str):

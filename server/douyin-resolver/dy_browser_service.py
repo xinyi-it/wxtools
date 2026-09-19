@@ -18,8 +18,9 @@
   GET /health
 用法: python3 dy_browser_service.py [port]   # 默认 3009
 """
-import sys, json, logging, os
+import sys, json, logging, os, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opencli_resolve import resolve_by_opencli, DEFAULT_SESSION
@@ -28,6 +29,14 @@ PORT = int(os.environ.get('DY_BROWSER_PORT', '3009'))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 log = logging.getLogger('dy-browser')
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """⚠️ 必须多线程：解析一次要 50 秒，单线程 HTTPServer 会被一个慢请求
+    堵死（连 /health 都不响应），上层全超时。
+    """
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -72,8 +81,8 @@ def main():
     global PORT
     if len(sys.argv) > 1:
         PORT = int(sys.argv[1])
-    server = HTTPServer(('0.0.0.0', PORT), Handler)
-    log.info(f'抖音浏览器兜底服务启动，监听 0.0.0.0:{PORT}')
+    server = ThreadingHTTPServer(('0.0.0.0', PORT), Handler)
+    log.info(f'抖音浏览器兜底服务启动（多线程），监听 0.0.0.0:{PORT}')
     try:
         server.serve_forever()
     except KeyboardInterrupt:

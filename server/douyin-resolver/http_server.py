@@ -102,7 +102,8 @@ class Handler(BaseHTTPRequestHandler):
         import urllib.parse, urllib.request
         target = f'{BROWSER_HOST}/resolve?' + urllib.parse.urlencode({'url': url})
         try:
-            with urllib.request.urlopen(target, timeout=180) as resp:
+            # 兜底要等页面渲染，实测 50-90 秒，超时必须给足
+            with urllib.request.urlopen(target, timeout=220) as resp:
                 payload = json.loads(resp.read().decode('utf-8'))
             if payload.get('code') == 200 and payload.get('data'):
                 return True, payload['data']

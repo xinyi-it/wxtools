@@ -70,7 +70,9 @@ class DouyinService {
       try {
         resp = await axios.get(`${RESOLVER_HOST}/parse`, {
           params: { url, cookie: userCookie },
-          timeout: 120000,
+          // ⚠️ 给足时间：接口通道失败 + 浏览器兜底渲染页面，实测总计约 50-90 秒。
+          //    原来 120000 太紧，兜底跑到一半就被判超时（前端显示"解析服务不可用"）。
+          timeout: 240000,
         });
       } catch (e) {
         const connErr = e.code === 'ECONNREFUSED' || e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';

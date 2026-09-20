@@ -28,7 +28,7 @@ export function parseDouyinUrl(url) {
  * @param {string} taskId 任务ID
  */
 export function queryDouyinTask(taskId) {
-  return request.get('/douyin/parse/task', { params: { taskId } })
+  return request.get('/douyin/parse/task', { taskId })
 }
 
 /**

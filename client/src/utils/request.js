@@ -13,28 +13,56 @@ const TIMEOUT = 30000
 const DOWNLOAD_TIMEOUT = 300000
 
 /**
+ * 把对象拼成查询串（GET 请求用）
+ * 显式拼接而不是依赖 uni.request 对 GET data 的隐式处理，避免参数被整个塞进一个字段。
+ */
+const buildQuery = (params) => {
+  if (!params) return ''
+  const parts = []
+  Object.keys(params).forEach((key) => {
+    const val = params[key]
+    if (val === undefined || val === null || val === '') return
+    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(val)}`)
+  })
+  return parts.length ? `?${parts.join('&')}` : ''
+}
+
+/**
  * 核心请求方法
  * @param {Object} config 请求配置
  * @returns {Promise}
  */
 const request = (config) => {
   return new Promise((resolve, reject) => {
+    const method = (config.method || 'GET').toUpperCase()
+
     // 构建完整URL
-    const url = config.url.startsWith('http') ? config.url : BASE_URL + config.url
+    let url = config.url.startsWith('http') ? config.url : BASE_URL + config.url
+
+    // GET 请求：参数拼到 URL 上，不带 body
+    const isGet = method === 'GET'
+    if (isGet) {
+      const qs = buildQuery(config.data)
+      url += url.includes('?') ? qs.replace('?', '&') : qs
+    }
 
     // 请求配置
     const requestConfig = {
       url,
-      method: config.method || 'GET',
-      data: config.data,
+      method,
       header: {
-        'Content-Type': 'application/json',
+        ...(isGet ? {} : { 'Content-Type': 'application/json' }),
         ...config.header
       },
       timeout: config.timeout || TIMEOUT
     }
 
-    // 发起请求
+    // 只有非 GET 才带 body
+    if (!isGet) {
+      requestConfig.data = config.data
+    }
+
+    // 发起请求<br>
     uni.request({
       ...requestConfig,
       success: (response) => {

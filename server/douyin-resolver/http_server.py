@@ -76,6 +76,7 @@ class Handler(BaseHTTPRequestHandler):
             'cover': data.get('cover', ''),
             'videoUrl': data.get('videoUrl', ''),
             'musicUrl': data.get('musicUrl', ''),
+            'musicTitle': data.get('musicTitle', ''),
             'duration': round(dur / 1000, 1) if dur > 1000 else dur,
             'statistics': {
                 'likes': data.get('likes', 0),

@@ -158,6 +158,9 @@ def _fetch_detail_in_page(session: str, vid: str) -> dict:
       而 detail 接口返回的 cover 带 PackSourceEnum_AWEME_DETAIL，
       是这条作品自己的封面，唯一可靠来源。
 
+      图文笔记同理：DOM 里的轮播图是懒加载的，只能看到当前渲染的那几张，
+      所以永远只拿到第一张。接口的 images 数组才是完整列表。
+
     注意：接口要在页面上下文里 fetch（带登录态 + 页面自带的签名逻辑），
          从容器/命令行裸调会因签名失效返回空 body。
     """
@@ -174,12 +177,23 @@ def _fetch_detail_in_page(session: str, vid: str) -> dict:
         "if(!a.aweme_id)return JSON.stringify({ok:false,status:r.status});"
         "const v=a.video||{};"
         "const pick=o=>{o=o||{};const l=o.url_list||[];return l[0]||'';};"
+        # 图片列表：优先取最大尺寸的那张（url_list 最后一个通常分辨率最高）
+        "const imgs=(a.images||[]).map(im=>{"
+        "  const l=(im.url_list||[]).filter(Boolean);"
+        "  return l[l.length-1]||'';"
+        "}).filter(Boolean);"
         "return JSON.stringify({ok:true,"
+        "aweme_type:a.aweme_type||0,"
         "desc:a.desc||'',"
         "author:(a.author||{}).nickname||'',"
         "cover:pick(v.cover)||pick(v.origin_cover)||'',"
-        "origin_cover:pick(v.origin_cover)||'',"
         "duration:(v.duration||0)/1000,"
+        "images:imgs,"
+        # 背景音乐（黑屏/静态图 + 音乐的作品靠这条）
+        # 注意：music 的直链在 play_url.url_list，不是 music.url_list
+        "music:((m=>{const l=((m.play_url||{}).url_list||[]).filter(Boolean);"
+        "return l[0]||'';})(a.music||{})),"
+        "music_title:(a.music||{}).title||'',"
         "likes:(a.statistics||{}).digg_count||0,"
         "comments:(a.statistics||{}).comment_count||0,"
         "shares:(a.statistics||{}).share_count||0,"
@@ -205,17 +219,20 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
 
     page_url = f'https://www.douyin.com/video/{vid}'
 
-    # 1) 打开页面
-    out = _run_opencli(['browser', session, 'open', page_url], timeout=120)
-    if out == '__TIMEOUT__':
-        # 页面可能已加载完，继续尝试读取；真正超时才放弃
-        pass
-
-    # 2) 等播放器渲染（短视频一般 3-6 秒）
-    #    页面类型要一起探：视频读 <video><source>，图文笔记（slides）页面没有播放器，
-    #    硬等只会白耗 45 秒，所以探到 slides 就立刻转去抓图片。
     import time
-    deadline = time.time() + 45
+
+    # 1) 导航到页面
+    #
+    # ⚠️ 不要用 `browser open` —— 它会等页面完全静止（图片/视频/埋点全停），
+    #    实测抖音详情页要 57 秒才返回，而真正的数据早就有了。
+    #    改成发一条导航指令（0.5 秒返回），然后自己轮询读取，13 秒就能出结果。
+    _run_opencli(['browser', session, 'eval',
+                  f'location.href={json.dumps(page_url)}; "nav"'], timeout=30)
+    time.sleep(2)
+
+    # 2) 等页面把播放器/图片渲染出来
+    #    视频看 <video><source>，图文看轮播图；哪边先出就按哪边处理。
+    deadline = time.time() + 40
     sources = []
     meta = {}
     best_meta = {}
@@ -223,16 +240,13 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
     is_slides = False
 
     while time.time() < deadline:
-        time.sleep(3)
+        time.sleep(1.5)
         raw = _run_opencli([
             'browser', session, 'eval',
             # 元数据提取（选择器均在真实页面验证过）：
-            #   title  —— document.title
             #   author —— [data-e2e="user-info"] 里指向 /user/ 的链接文本
-            #             （页面上真正有文字的锚点，旧的 video-author-name 已失效）
-            #   cover  —— 播放器容器的 background-image（440x330，正是本作品封面）
-            #             video 标签没设 poster，必须走背景图这条路
-            #   stat   —— detail-video-info 的文本行，按顺序是 赞/评/藏/转
+            #             （旧的 video-author-name 已失效）
+            #   slides —— 图文轮播的图，尽量全取（不只第一张）
             "JSON.stringify({src:[...document.querySelectorAll('video source')].map(s=>s.src),"
             "cur:[...document.querySelectorAll('video')].map(v=>v.currentSrc),"
             "title:document.title,"
@@ -240,41 +254,45 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             "if(!el)return '';"
             "const a=[...el.querySelectorAll('a[href*=\"/user/\"]')].find(x=>x.innerText.trim());"
             "if(a)return a.innerText.trim();"
-            # 兜底：整块文本第一段（形如「昵称粉丝xx获赞xx」）
             "const t=el.innerText.trim();"
             "const mm=t.match(/^(.+?)(粉丝|获赞|关注)/);"
             "return mm?mm[1].trim():'';})(),"
-            "cover:(()=>{const c=document.querySelector('[data-e2e=\"player-container\"]');"
-            "if(c){for(const e of c.querySelectorAll('*')){"
-            "const bg=e.style&&e.style.backgroundImage;"
-            "if(bg&&bg.includes('http'))return bg.replace(/^url\\([\"\\']?/,'').replace(/[\"\\']?\\)$/,'');}}"
-            "return '';})(),"
             "dur:(document.querySelector('video')||{}).duration||0,"
-            # 图文笔记：轮播图容器内的 img
-            "slides:[...document.querySelectorAll('[data-e2e=\"slides-item\"] img, .swiper-slide img, [class*=slides] img')]"
-            ".map(i=>i.src).filter(s=>s&&s.startsWith('http')),"
-            # 互动数据行
+            # 图文：轮播容器里所有图（含懒加载的 data-src）
+            "slides:[...document.querySelectorAll("
+            "'[data-e2e=\"slides-item\"] img, [class*=slides] img, "
+            "[class*=swiper-slide] img, [class*=image-carousel] img')]"
+            ".map(i=>i.currentSrc||i.src||i.getAttribute('data-src')||'')"
+            ".filter(s=>s&&s.startsWith('http')),"
+            "imgCount:document.querySelectorAll('[class*=swiper-slide]').length,"
             "info:(()=>{const el=document.querySelector('[data-e2e=\"detail-video-info\"]');"
             "return el?el.innerText.trim():'';})()})"
-        ], timeout=60)
+        ], timeout=30)
         data = _pick_source_json(raw)
-        if isinstance(data, dict):
-            meta = data
-            # 记录信息最全的一份（作者/封面/时长可能要等页面渲染完才有）
-            if data.get('author') or data.get('dur') or data.get('cover'):
-                best_meta = data
-            srcs = [s for s in (data.get('src') or []) if s and s.startswith('http')]
-            if srcs:
-                sources = srcs
-            # 探到图文图片 -> 不是视频页，立刻收工
-            imgs = [s for s in (data.get('slides') or []) if s and s.startswith('http')]
-            if imgs and not srcs:
-                slide_images = imgs
-                is_slides = True
+        if not isinstance(data, dict):
+            continue
+
+        meta = data
+        if data.get('author') or data.get('dur'):
+            best_meta = data
+        srcs = [s for s in (data.get('src') or []) if s and s.startswith('http')]
+        if srcs:
+            sources = srcs
+        imgs = [s for s in (data.get('slides') or []) if s and s.startswith('http')]
+
+        # 图文页没有播放器；只要探到图就按图文处理，别硬等播放器
+        if imgs and not srcs:
+            slide_images = imgs
+            is_slides = True
+            # 轮播可能还没全部渲染，等多一拍把后面的图收全
+            if len(imgs) >= (data.get('imgCount') or 0) or len(imgs) >= 18:
                 break
-            # 元数据齐了就提前退出（作者+封面+时长都有），不必耗满 45 秒
-            if data.get('author') and data.get('dur') and data.get('cover'):
-                break
+            time.sleep(1.5)
+            continue
+
+        # 视频：拿到直链就够，元数据统一由 detail 接口补
+        if srcs:
+            break
 
     # 合并元数据：优先用信息更全的那份
     merged = dict(meta)
@@ -284,10 +302,11 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
     meta = merged
 
     # ---------- 权威元数据：detail 接口 ----------
-    # DOM 上的封面分不清「本作品」和「右侧推荐」，实测拿错过。
-    # 接口返回的才靠谱（封面带 PackSourceEnum_AWEME_DETAIL）。
-    # 拿不到也不致命，继续用 DOM 那份兜着。
+    # DOM 上分不清「本作品」和「右侧推荐」，封面也拿错过；
+    # 图文的轮播图是懒加载的，DOM 里只能看到第一张。
+    # 接口返回的才是完整、准确的数据。
     detail = _fetch_detail_in_page(session, vid)
+    api_images = []
     if detail.get('ok'):
         if detail.get('author'):
             meta['author'] = detail['author']
@@ -297,7 +316,7 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             meta['title'] = detail['desc']
         if detail.get('duration'):
             meta['dur'] = detail['duration']
-        # 接口的统计数字比解析页面文本更准
+        api_images = detail.get('images') or []
         meta['api_stats'] = {
             'likes': detail.get('likes') or 0,
             'comments': detail.get('comments') or 0,
@@ -308,28 +327,28 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
         log_note = detail.get('status') or detail.get('err') or '未知原因'
         print(f'[opencli] detail 接口未取到元数据（{log_note}），沿用页面数据', file=sys.stderr)
 
-    # ---------- 图文笔记分支 ----------
-    # 图文没有播放地址，走图片列表返回（结构对齐 resolve.py 的 type=images）
-    if is_slides and not sources:
-        title = re.sub(r'\s*-\s*抖音\s*$', '', (meta.get('title') or '').strip())
-        # 去掉重复图（同一张图常有多种尺寸后缀）
+    # ---------- 图文作品 ----------
+    # 判定优先级：接口给了 images 就用它（完整列表）；否则退回 DOM 抓到的图。
+    if api_images or (is_slides and slide_images):
+        imgs = api_images or slide_images
+        # 去重（同一张图常有多种尺寸后缀）
         seen = set()
         uniq = []
-        for u in slide_images:
+        for u in imgs:
             key = re.sub(r'~\w+\.(jpe?g|png|webp|heic)', '', u)
             if key in seen:
                 continue
             seen.add(key)
             uniq.append(u)
         if not uniq:
-            raise RuntimeError('图文笔记未取到图片（Chrome 未登录抖音，或页面未渲染）')
+            raise RuntimeError('图文作品未取到图片')
         st = meta.get('api_stats') or _parse_stats(meta.get('info') or '')
+        title = re.sub(r'\s*-\s*抖音\s*$', '', (meta.get('title') or '').strip())
         return {
             'id': vid,
             'type': 'images',
             'title': title,
             'author': (meta.get('author') or '').strip(),
-            # 封面优先用页面上的（已带签名，最准）；没有再退回第一张图
             'cover': (meta.get('cover') or '').strip() or uniq[0],
             'musicUrl': '',
             'duration': 0,
@@ -350,7 +369,14 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
                 break
 
     if not sources:
-        raise RuntimeError('opencli 模式未能取到播放地址（Chrome 未登录抖音，或页面未渲染出播放器）')
+        # 走到这说明：接口没给图片、页面也没抓到图片，但也没有播放地址。
+        # 常见于「单图当视频发」或页面没渲染出来。把接口信息带出去，便于排查。
+        atype = detail.get('aweme_type')
+        raise RuntimeError(
+            f'未取到播放地址或图片（aweme_type={atype}，'
+            f'Chrome 未登录抖音或页面未渲染出播放器）'
+        )
+
 
     # 优先 douyinvod（无水印 CDN）
     picked = next((s for s in sources if 'douyinvod' in s), sources[0])
@@ -370,7 +396,9 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
         'title': title,
         'author': (meta.get('author') or '').strip(),
         'cover': (meta.get('cover') or '').strip(),
-        'musicUrl': '',
+        # 背景音乐直链：有些作品本体是黑屏/静态图 + 音乐，这条才有用
+        'musicUrl': (detail.get('music') or '').strip(),
+        'musicTitle': (detail.get('music_title') or '').strip(),
         'duration': dur_ms,
         'likes': st['likes'],
         'comments': st['comments'],
@@ -378,6 +406,7 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
         'collects': st['collects'],
         'videoUrl': picked,
         'videoUrls': sources,
+        'awemeType': detail.get('aweme_type'),
         'source': 'opencli',
     }
 

@@ -193,17 +193,33 @@ def _fetch_detail_in_page(session: str, vid: str) -> dict:
         "const v=a.video||{};"
         "const pick=o=>{o=o||{};const l=o.url_list||[];return l[0]||'';};"
         # 图片列表：优先取最大尺寸的那张（url_list 最后一个通常分辨率最高）
+        # 动图（实况照片）：live_photo_type == 1，每张自带一个 1~3 秒的小视频，
+        #   视频直链在 im.video.play_addr.url_list。
+        #   注意 im.clip_type：5 = 有动图，2 = 纯静态图（没有 video 字段）。
+        #   这类作品在 App 里叫「动图合集」，如果只取图片会丢掉动态部分；
+        #   如果只取第一张的 video 当整条作品，就会变成那个「2 秒视频」的错误。
         "const imgs=(a.images||[]).map(im=>{"
         "  const l=(im.url_list||[]).filter(Boolean);"
-        "  return l[l.length-1]||'';"
-        "}).filter(Boolean);"
+        "  const vl=(((im.video||{}).play_addr||{}).url_list||[]).filter(Boolean);"
+        "  const dl=(im.download_url_list||[]).filter(Boolean);"
+        "  const isLive=(im.live_photo_type===1)&&vl.length>0;"
+        "  return {"
+        "    url:l[l.length-1]||'',"
+        "    live:isLive,"
+        "    videoUrl:isLive?(vl[0]||''):'',"
+        "    downloadUrl:isLive?(dl[dl.length-1]||''):'',"
+        "    dur:isLive?((((im.video||{}).duration)||0)/1000):0"
+        "  };"
+        "}).filter(x=>x.url||x.videoUrl);"
         "return JSON.stringify({ok:true,"
         "aweme_type:a.aweme_type||0,"
         "desc:a.desc||'',"
         "author:(a.author||{}).nickname||'',"
         "cover:pick(v.cover)||pick(v.origin_cover)||'',"
         "duration:(v.duration||0)/1000,"
-        "images:imgs,"
+        "images:imgs.map(x=>x.url).filter(Boolean),"
+        "images_detail:imgs,"
+        "liveCount:imgs.filter(x=>x.live).length,"
         # 背景音乐（黑屏/静态图 + 音乐的作品靠这条）
         # 注意：music 的直链在 play_url.url_list，不是 music.url_list
         "music:((m=>{const l=((m.play_url||{}).url_list||[]).filter(Boolean);"
@@ -265,7 +281,24 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             'collects': detail.get('collects') or 0,
         }
         imgs = _dedup_images(api_images)
+        # 动图合集：images_detail 带每张的 live 标记和各自的小视频直链。
+        # 前端拿这个列表才能把「动图」还原成动图，而不是退回静态图。
+        raw_detail = detail.get('images_detail') or []
+        live_items = []
+        for idx, it in enumerate(raw_detail):
+            if not isinstance(it, dict):
+                continue
+            live_items.append({
+                'index': idx,
+                'url': it.get('url') or '',
+                'live': bool(it.get('live')),
+                'videoUrl': it.get('videoUrl') or '',
+                'duration': it.get('dur') or 0,
+            })
+        live_count = sum(1 for x in live_items if x['live'])
         title = (detail.get('desc') or '').strip()
+        # 作品整体时长 = 各动图片段之和（纯图文为 0）
+        total_dur = sum(x['duration'] for x in live_items if x['live'])
         return {
             'id': vid,
             'type': 'images',
@@ -274,13 +307,16 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             'cover': (detail.get('cover') or '').strip() or (imgs[0] if imgs else ''),
             'musicUrl': (detail.get('music') or '').strip(),
             'musicTitle': (detail.get('music_title') or '').strip(),
-            'duration': 0,
+            'duration': total_dur,
             'likes': st['likes'],
             'comments': st['comments'],
             'shares': st['shares'],
             'collects': st['collects'],
             'images': imgs,
             'imageCount': len(imgs),
+            'isLivePhoto': live_count > 0,
+            'liveCount': live_count,
+            'imagesDetail': live_items,
             'awemeType': detail.get('aweme_type'),
             'source': 'opencli',
         }

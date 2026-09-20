@@ -88,6 +88,10 @@ class Handler(BaseHTTPRequestHandler):
         if itype == 'images':
             resp['images'] = data.get('images', [])
             resp['imageCount'] = data.get('imageCount', 0)
+            # 动图合集：每张图各自一个 1~3 秒小视频，前端按这个列表还原动图
+            resp['isLivePhoto'] = bool(data.get('isLivePhoto'))
+            resp['liveCount'] = data.get('liveCount', 0)
+            resp['imagesDetail'] = data.get('imagesDetail', [])
         return resp
 
     def _fallback_reason(self, err: str) -> bool:

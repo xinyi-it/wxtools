@@ -33,24 +33,54 @@
 
       <!-- 图文类型：显示图片列表 -->
       <view v-if="videoInfo.type === 'images'" class="images-section">
-        <view class="images-count">共 {{ videoInfo.images?.length || 0 }} 张图片</view>
+        <view class="images-count">
+          {{ imagesCountText }}
+        </view>
         <scroll-view scroll-x class="image-scroll">
           <view class="image-list">
             <view
               class="image-item"
-              v-for="(img, index) in videoInfo.images"
+              v-for="(item, index) in imageItems"
               :key="index"
               @click="previewImage(index)"
             >
-              <image class="preview-img" :src="img" mode="aspectFit" />
+              <!-- 动图：静帧当封面，点击进全屏看动态 -->
+              <image class="preview-img" :src="item.thumb" mode="aspectFit" />
               <view class="page-num">{{ index + 1 }}</view>
+              <view v-if="item.live" class="live-badge">动图</view>
+              <view v-if="item.live" class="live-play">
+                <text class="live-play-icon">▶</text>
+              </view>
             </view>
           </view>
         </scroll-view>
+
+        <!-- 动图全屏播放：一次播一张，播完/关闭回列表 -->
+        <view v-if="activeLive" class="live-player-mask" @click="closeLivePlayer">
+          <view class="live-player-box" @click.stop>
+            <video
+              class="live-player"
+              :src="activeLive.proxyUrl"
+              :autoplay="true"
+              :controls="true"
+              :loop="true"
+              :show-center-play-btn="false"
+              object-fit="contain"
+            />
+            <view class="live-player-bar">
+              <text class="live-player-label">
+                动图 {{ activeLive.index + 1 }}/{{ imageItems.length }}
+                （{{ activeLive.duration }}秒）
+              </text>
+              <text class="live-player-close" @click="closeLivePlayer">关闭</text>
+            </view>
+          </view>
+        </view>
+
         <view class="btn-wrapper" @click="saveAllImages">
           <view class="btn-save" :class="{ disabled: saving }">
             <view class="btn-progress-bg save-progress" :style="{ width: (savingIndex / savingTotal * 100) + '%' }"></view>
-            <text class="btn-text">{{ saving ? `保存中 ${savingIndex}/${savingTotal}` : '保存全部图片' }}</text>
+            <text class="btn-text">{{ saveBtnText }}</text>
           </view>
         </view>
       </view>
@@ -129,6 +159,53 @@ onShareTimeline(() => {
 const proxyVideoUrl = computed(() => {
   if (!videoInfo.value?.videoUrl) return '';
   return getDouyinDownloadUrl(videoInfo.value.videoUrl);
+});
+
+// ---------- 图文 / 动图合集 ----------
+//
+// 抖音的「图文」有两种：
+//   1. 纯图文：每张就是一张静态图
+//   2. 动图合集（实况照片）：每张自带一个 1.5~2.8 秒的小视频，
+//      后端在 imagesDetail 里用 live + videoUrl 标出来
+//
+// 所以列表项要按 imagesDetail 组装，不能只读 images —— 只读 images 会把
+// 动图全部降级成静态图，用户就看不到动态部分。
+const activeLive = ref(null);
+
+const imageItems = computed(() => {
+  const info = videoInfo.value;
+  if (!info) return [];
+  const detail = Array.isArray(info.imagesDetail) ? info.imagesDetail : [];
+  const flat = Array.isArray(info.images) ? info.images : [];
+
+  // 后端没给 imagesDetail（旧数据 / 纯图文）时，退回纯图片列表
+  if (!detail.length) {
+    return flat.map((url) => ({ thumb: url, live: false, videoUrl: '', duration: 0 }));
+  }
+
+  return detail.map((it, i) => ({
+    thumb: it.url || flat[i] || '',
+    live: !!it.live,
+    videoUrl: it.videoUrl || '',
+    duration: it.duration ? Math.round(it.duration * 10) / 10 : 0,
+  }));
+});
+
+const imagesCountText = computed(() => {
+  const info = videoInfo.value;
+  if (!info) return '';
+  const total = imageItems.value.length;
+  const liveCount = imageItems.value.filter((x) => x.live).length;
+  if (liveCount > 0) {
+    return `共 ${total} 项（${liveCount} 个动图 + ${total - liveCount} 张图片）`;
+  }
+  return `共 ${total} 张图片`;
+});
+
+const saveBtnText = computed(() => {
+  if (saving.value) return `保存中 ${savingIndex.value}/${savingTotal.value}`;
+  const liveCount = imageItems.value.filter((x) => x.live).length;
+  return liveCount > 0 ? '保存全部（动图存为视频）' : '保存全部图片';
 });
 
 // 从剪贴板粘贴
@@ -290,60 +367,96 @@ const downloadVideo = async () => {
   }
 };
 
-// 预览图片
+// 预览图片 / 动图
+//
+// 动图不能走 uni.previewImage —— 那是纯图片查看器，动图会显示成一张静图。
+// 动图改为打开全屏 video 播放器（activeLive），静图照旧走 previewImage。
 const previewImage = (index) => {
-  if (!videoInfo.value?.images) return;
+  const item = imageItems.value[index];
+  if (!item) return;
+
+  if (item.live && item.videoUrl) {
+    activeLive.value = {
+      index,
+      proxyUrl: getDouyinDownloadUrl(item.videoUrl),
+      duration: item.duration,
+    };
+    return;
+  }
+
+  const urls = imageItems.value.filter((x) => !x.live).map((x) => x.thumb);
+  const cur = urls.indexOf(item.thumb);
   uni.previewImage({
-    urls: videoInfo.value.images,
-    current: index
+    urls,
+    current: cur >= 0 ? cur : 0,
   });
 };
 
-// 保存全部图片到相册
+const closeLivePlayer = () => {
+  activeLive.value = null;
+};
+
+// 保存全部：静图存相册，动图存为视频
+//
+// 动图的 videoUrl 是视频直链，用 downloadFile + saveVideoToPhotosAlbum 落盘，
+// 存下来是一个 ~500KB 的短视频，正好还原「动图」效果。
 const saveAllImages = async () => {
   // 防抖：如果正在保存则直接返回
   if (saving.value) return;
 
-  if (!videoInfo.value?.images || videoInfo.value.images.length === 0) {
-    uni.showToast({ title: '没有可保存的图片', icon: 'none' });
+  const items = imageItems.value;
+  if (!items.length) {
+    uni.showToast({ title: '没有可保存的内容', icon: 'none' });
     return;
   }
 
   saving.value = true;
-  savingTotal.value = videoInfo.value.images.length;
+  savingTotal.value = items.length;
   savingIndex.value = 0;
   let saved = 0;
 
-  for (let i = 0; i < videoInfo.value.images.length; i++) {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
     savingIndex.value = i + 1;
     try {
-      // 使用后端代理下载图片，解决防盗链问题
+      // 使用后端代理下载，解决防盗链问题
       const tempFilePath = await request.download(
-        getDouyinDownloadUrl(videoInfo.value.images[i])
+        getDouyinDownloadUrl(item.live ? item.videoUrl : item.thumb)
       );
 
       await new Promise((resolve, reject) => {
-        uni.saveImageToPhotosAlbum({
-          filePath: tempFilePath,
-          success: () => {
-            saved++;
-            resolve();
-          },
-          fail: (err) => {
-            if (err.errMsg?.includes('auth deny')) {
-              uni.showModal({
-                title: '提示',
-                content: '需要授权保存到相册权限',
-                success: (modalRes) => {
-                  if (modalRes.confirm) {
-                    uni.openSetting();
-                  }
+        const onOk = () => {
+          saved++;
+          resolve();
+        };
+        const onFail = (err) => {
+          if (err.errMsg?.includes('auth deny')) {
+            uni.showModal({
+              title: '提示',
+              content: '需要授权保存到相册权限',
+              success: (modalRes) => {
+                if (modalRes.confirm) {
+                  uni.openSetting();
                 }
-              });
-            }
-            reject(err);
+              }
+            });
           }
-        });
+          reject(err);
+        };
+
+        if (item.live) {
+          uni.saveVideoToPhotosAlbum({
+            filePath: tempFilePath,
+            success: onOk,
+            fail: onFail,
+          });
+        } else {
+          uni.saveImageToPhotosAlbum({
+            filePath: tempFilePath,
+            success: onOk,
+            fail: onFail,
+          });
+        }
       });
     } catch (e) {
       console.error('保存失败:', e);
@@ -353,7 +466,7 @@ const saveAllImages = async () => {
   saving.value = false;
   savingIndex.value = 0;
   if (saved > 0) {
-    uni.showToast({ title: `已保存${saved}张图片`, icon: 'success' });
+    uni.showToast({ title: `已保存${saved}项`, icon: 'success' });
   }
 };
 </script>
@@ -630,6 +743,88 @@ const saveAllImages = async () => {
   font-size: 22rpx;
   padding: 4rpx 12rpx;
   border-radius: 20rpx;
+}
+
+/* 动图标记：左上角角标 + 中央播放按钮 */
+.live-badge {
+  position: absolute;
+  top: 10rpx;
+  left: 10rpx;
+  background-color: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 20rpx;
+  padding: 4rpx 12rpx;
+  border-radius: 6rpx;
+}
+
+.live-play {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.live-play-icon {
+  width: 64rpx;
+  height: 64rpx;
+  line-height: 64rpx;
+  text-align: center;
+  border-radius: 50%;
+  background-color: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 26rpx;
+  padding-left: 6rpx;
+  box-sizing: border-box;
+}
+
+/* 动图全屏播放 */
+.live-player-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+}
+
+.live-player-box {
+  width: 90%;
+  max-width: 660rpx;
+}
+
+.live-player {
+  width: 100%;
+  height: 880rpx;
+  border-radius: 12rpx;
+  background-color: #000;
+}
+
+.live-player-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 24rpx;
+}
+
+.live-player-label {
+  color: #ddd;
+  font-size: 24rpx;
+}
+
+.live-player-close {
+  color: #fff;
+  font-size: 26rpx;
+  padding: 8rpx 28rpx;
+  border: 1rpx solid rgba(255, 255, 255, 0.5);
+  border-radius: 30rpx;
 }
 
 .btn-save {

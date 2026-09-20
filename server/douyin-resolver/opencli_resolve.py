@@ -87,8 +87,12 @@ def _pick_source_json(out: str):
 def resolve_by_opencli(target: str, session: str = DEFAULT_SESSION, retries: int = 2) -> dict:
     """解析（带重试）
 
-    抖音页面偶发不吐播放器（渲染慢、风控抽风），单次失败不代表链接有问题，
-    所以失败后重新打开页面再试，实测重试一次基本都能成。
+    抖音页面偶发不吐数据（渲染慢、风控抽风），单次失败不代表链接有问题，
+    所以失败后重试，实测重试一次基本都能成。
+
+    ⚠️ 重试之间**不要 reload + sleep**：reload 会把页面打进资源加载高峰，
+    紧接着的探测会被主线程堵住（实测单次往返 1.6s → 45s），越重试越慢。
+    _resolve_once 内部已经有导航 + 轮询，直接重跑一遍就是最干净的重试。
     """
     last_err = None
     for attempt in range(1, retries + 1):
@@ -96,14 +100,6 @@ def resolve_by_opencli(target: str, session: str = DEFAULT_SESSION, retries: int
             return _resolve_once(target, session)
         except Exception as e:
             last_err = e
-            if attempt < retries:
-                # 重试前重开一次页面，别在同一个坏状态上反复读
-                try:
-                    _run_opencli(['browser', session, 'eval', 'location.reload()'], timeout=30)
-                except Exception:
-                    pass
-                import time as _t
-                _t.sleep(3)
     raise last_err if last_err else RuntimeError('解析失败')
 
 
@@ -163,21 +159,16 @@ def _dedup_images(imgs):
     return out
 
 
-def _fetch_detail_in_page(session: str, vid: str) -> dict:
-    """在浏览器页面上下文里调 aweme/detail 接口，拿权威元数据
+def _probe_once(session: str, vid: str) -> dict:
+    """一次往返同时取「detail 接口数据」+「DOM 播放器直链」
 
-    为什么必须走这条路：
-      页面上那些 img/背景图不区分「本条作品」和「右侧推荐」，取到的常常是
-      related 视频的缩略图（URL 里带 PackSourceEnum_WEBPC_RELATED_AWEME）。
-      实测拿错过封面 —— 取到的是推荐位另一条视频的图。
-      而 detail 接口返回的 cover 带 PackSourceEnum_AWEME_DETAIL，
-      是这条作品自己的封面，唯一可靠来源。
+    为什么要合并成一次：
+      每次 `opencli browser eval` 固定有 1~1.5 秒进程往返开销，跟表达式复杂
+      程度无关。旧写法是接口一次、DOM 一次，交替轮询，白搭一倍往返。
+      实测 detail 接口在正确页面上 1.6 秒就绪，DOM 播放器要等 10 秒以上
+      —— 合并后一次往返就能同时拿到两边的进度，轮询轮数直接减半。
 
-      图文笔记同理：DOM 里的轮播图是懒加载的，只能看到当前渲染的那几张，
-      所以永远只拿到第一张。接口的 images 数组才是完整列表。
-
-    注意：接口要在页面上下文里 fetch（带登录态 + 页面自带的签名逻辑），
-         从容器/命令行裸调会因签名失效返回空 body。
+    返回 {ok, images, videoUrl, ...}；ok=False 表示页面还没准备好在哪一步。
     """
     js = (
         "(async()=>{try{"
@@ -189,9 +180,29 @@ def _fetch_detail_in_page(session: str, vid: str) -> dict:
         "const r=await fetch(u,{credentials:'include'});"
         "const j=await r.json();"
         "const a=j.aweme_detail||{};"
-        "if(!a.aweme_id)return JSON.stringify({ok:false,status:r.status});"
+        # DOM 播放器直链（同一次往返里顺带取，仅作兜底）
+        "const vs=[...document.querySelectorAll('video source')].map(s=>s.src)"
+        "  .filter(x=>x&&x.startsWith('http'));"
+        "const vc=[...document.querySelectorAll('video')].map(v=>v.currentSrc)"
+        "  .filter(x=>x&&x.startsWith('http')&&x.includes('douyinvod'));"
         "const v=a.video||{};"
         "const pick=o=>{o=o||{};const l=o.url_list||[];return l[0]||'';};"
+        # ⭐ 视频直链直接从接口拿，不要等 DOM 播放器！
+        #
+        # 实测数据（冷启动，导航到视频页后）：
+        #   接口就绪        ~1 秒
+        #   DOM 播放器就绪  ~115 秒   ← 等它纯属浪费
+        # 两者给的 CDN 域名一样（douyinvod），接口还多给 27 档码率可选。
+        # play_addr 是「播放地址」（无水印），download_addr 是「带水印下载地址」，
+        # 注意别取错 —— 接口的 has_watermark 标志指的是 download_addr。
+        "const g=o=>(o&&o.url_list)?o.url_list.filter(Boolean):[];"
+        "const vurls=g(v.play_addr).filter(x=>x.includes('douyinvod'));"
+        "const vurlsH=g(v.play_addr_h264).filter(x=>x.includes('douyinvod'));"
+        # 码率档位：bit_rate 里挑一份更高清的（可选，失败不影响主流程）
+        "const brUrls=[];"
+        "try{(v.bit_rate||[]).forEach(b=>{const l=g(b.play_addr)"
+        "  .filter(x=>x.includes('douyinvod'));if(l[0])brUrls.push(l[0]);});}catch(e){}"
+        "const norm=u=>u.replace('/playwm/','/play/');"
         # 图片列表：优先取最大尺寸的那张（url_list 最后一个通常分辨率最高）
         # 动图（实况照片）：live_photo_type == 1，每张自带一个 1~3 秒的小视频，
         #   视频直链在 im.video.play_addr.url_list。
@@ -211,7 +222,13 @@ def _fetch_detail_in_page(session: str, vid: str) -> dict:
         "    dur:isLive?((((im.video||{}).duration)||0)/1000):0"
         "  };"
         "}).filter(x=>x.url||x.videoUrl);"
-        "return JSON.stringify({ok:true,"
+        "return JSON.stringify({"
+        # ok 的判据只看接口有没有给出这条作品 —— 页面播放器可能还在渲染
+        "ok:!!a.aweme_id,"
+        "apiStatus:r.status,"
+        "apiVideoUrls:[...vurls,...vurlsH].map(norm),"
+        "apiBitRateUrls:brUrls.map(norm),"
+        "videoSrc:(vs[0]||vc[0]||''),"
         "aweme_type:a.aweme_type||0,"
         "desc:a.desc||'',"
         "author:(a.author||{}).nickname||'',"
@@ -231,9 +248,91 @@ def _fetch_detail_in_page(session: str, vid: str) -> dict:
         "collects:(a.statistics||{}).collect_count||0});"
         "}catch(e){return JSON.stringify({ok:false,err:String(e)});}})()"
     )
-    out = _run_opencli(['browser', session, 'eval', js], timeout=60)
+    out = _run_opencli(['browser', session, 'eval', js], timeout=45)
     d = _pick_source_json(out)
     return d if isinstance(d, dict) else {}
+
+
+def _fetch_detail_in_page(session: str, vid: str) -> dict:
+    """兼容入口：原来只取接口数据的路径，现在走合并探测。
+
+    保留这个函数名是因为外部（和调试脚本）还在调它；实现委托给 _probe_once。
+    """
+    return _probe_once(session, vid)
+
+
+def _dom_only_probe(session: str, deadline: float):
+    """纯 DOM 兜底：接口整个拿不到时（例如登录态失效）只能读页面
+
+    返回 (meta, sources, slide_images, is_slides)。
+    这条路径比接口慢很多，只在接口彻底失败时才走。
+    """
+    import time
+    meta = {}
+    best_meta = {}
+    sources = []
+    slide_images = []
+    is_slides = False
+
+    while time.time() < deadline:
+        time.sleep(1.2)
+        raw = _run_opencli([
+            'browser', session, 'eval',
+            # 元数据提取（选择器均在真实页面验证过）：
+            #   author —— [data-e2e="user-info"] 里指向 /user/ 的链接文本
+            #             （旧的 video-author-name 已失效）
+            #   slides —— 图文轮播的图，尽量全取（不只第一张）
+            "JSON.stringify({src:[...document.querySelectorAll('video source')].map(s=>s.src),"
+            "cur:[...document.querySelectorAll('video')].map(v=>v.currentSrc),"
+            "title:document.title,"
+            "author:(()=>{const el=document.querySelector('[data-e2e=\\\"user-info\\\"]');"
+            "if(!el)return '';"
+            "const a=[...el.querySelectorAll('a[href*=\\\"/user/\\\"]')].find(x=>x.innerText.trim());"
+            "if(a)return a.innerText.trim();"
+            "const t=el.innerText.trim();"
+            "const mm=t.match(/^(.+?)(粉丝|获赞|关注)/);"
+            "return mm?mm[1].trim():'';})(),"
+            "dur:(document.querySelector('video')||{}).duration||0,"
+            # 图文：轮播图特征 URL 是 tplv-dy-aweme-images，容器是 player-container。
+            # （图文页也有 <video> 元素，所以不能靠「有没有 video」判断类型，
+            #   必须看有没有这组图。）
+            "slides:[...document.querySelectorAll('img')]"
+            ".filter(i=>i.src&&i.src.includes('aweme-images'))"
+            ".map(i=>i.src),"
+            "info:(()=>{const el=document.querySelector('[data-e2e=\\\"detail-video-info\\\"]');"
+            "return el?el.innerText.trim():'';})()})"
+        ], timeout=30)
+        data = _pick_source_json(raw)
+        if not isinstance(data, dict):
+            continue
+
+        meta = data
+        if data.get('author') or data.get('dur'):
+            best_meta = data
+        srcs = [s for s in (data.get('src') or []) if s and s.startswith('http')]
+        if srcs:
+            sources = srcs
+        imgs = [s for s in (data.get('slides') or []) if s and s.startswith('http')]
+
+        # 图文优先判定！
+        #
+        # ⚠️ 图文页里也有 <video> 元素（背景/占位），所以不能靠「有没有 video」
+        #    来区分类型，否则图文会被当成视频处理。
+        #    判据是那组 tplv-dy-aweme-images 的图。
+        if imgs:
+            slide_images = imgs
+            is_slides = True
+            break
+
+        # 视频：拿到直链就够
+        if srcs:
+            break
+
+    merged = dict(meta)
+    for k, v in (best_meta or {}).items():
+        if v and not merged.get(k):
+            merged[k] = v
+    return merged, sources, slide_images, is_slides
 
 
 def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
@@ -252,25 +351,118 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
 
     import time
 
-    # 1) 导航到页面
+    # 1) 先把页面重置到空白页，再导航
+    #
+    # ⚠️ 为什么要先重置（实测发现，反直觉）：
+    #    解析速度不取决于抖音页面的渲染，而取决于**上一个页面是什么**。
+    #    上一页若是抖音（SPA 残留大量资源/长连接），opencli 的 eval 通道会被
+    #    堵住 —— 实测单次 evals 从 0.4 秒涨到 40~60 秒，导航指令直接超时。
+    #    从 about:blank 出发则导航 0.42 秒、探测 1.48 秒，不到 2 秒搞定。
+    #
+    #    对比（同一条链接连续解析）：
+    #      直接解析:     4.5s ✓ / 138.9s ✗ / 24.1s ✓   ← 会失败
+    #      先重置再解析: 13.3s ✓ / 5.9s ✓ / 59.5s ✓    ← 都成功
+    #    重置多花几秒，但换来稳定，值。
+    #
+    # ⚠️ 重置本身也可能被堵（页面正忙时同样会卡），所以给它设短超时，
+    #    超时就放弃重置、直接往下走 —— 不能因为"优化"把主流程搞挂。
+    try:
+        _run_opencli(['browser', session, 'eval',
+                      "location.href='about:blank';'ok'"], timeout=12)
+    except Exception:
+        pass  # 重置失败不算错，退化成本来的直接导航
+
+    # 2) 导航到目标页面
     #
     # ⚠️ 不要用 `browser open` —— 它会等页面完全静止（图片/视频/埋点全停），
-    #    实测抖音详情页要 57 秒才返回，而真正的数据早就有了。
-    #    改成发一条导航指令（0.5 秒返回），然后自己轮询读取。
+    #    实测抖音详情页要 57~60 秒才返回，而真正的数据早就有了。
     #
     # 统一用 /video/ 地址：抖音会按作品类型自己跳到 /note/ 或留在 /video/。
     # 实测直接上 /note/ 反而渲染不出来（播放器 30 秒都不出）。
     page_url = f'https://www.douyin.com/video/{vid}'
     _run_opencli(['browser', session, 'eval',
                   f'location.href={json.dumps(page_url)}; "nav"'], timeout=30)
-    time.sleep(1.5)
 
-    # 2) 先问接口 —— 图文作品的完整图片列表只有接口有（DOM 里是懒加载的）。
-    #    接口能秒回，拿到了就直接用，不必等页面慢慢渲染。
-    detail = _fetch_detail_in_page(session, vid)
-    api_images = []
-    if detail.get('ok'):
-        api_images = detail.get('images') or []
+    # 2) 单循环轮询：一次往返同时看「接口」和「DOM 播放器」
+    #
+    # ⚠️ 关键认知一：detail 接口的返回依赖「页面当前就在这条作品上」。
+    #    Chrome 停在上一个视频时，它返回的是 HTTP 200 但 aweme_id 为空的体，
+    #    不报错、静默给空 —— 傻等它永远等不到。
+    #
+    # ⚠️ 关键认知二（省时间的大头）：视频直链从接口的 video.play_addr 拿，
+    #    不要等 DOM 播放器。冷启动实测：
+    #      接口就绪        ~1.6 秒（导航发出后立刻就能查）
+    #      DOM 播放器就绪  ~115 秒   ← 等它纯属浪费，两者 CDN 域名和文件路径相同
+    #
+    # ⚠️ 关键认知三（最反直觉的一条）：**别在导航后 sleep**。
+    #    页面刚导航的那一两秒接口就能返回；一旦等页面开始加载资源，
+    #    opencli 的 eval 往返会被页面主线程堵住，实测单次从 1.6 秒涨到 45 秒。
+    #    也就是说「多等一会儿再查」反而更慢 —— 越早查越快。
+    #    所以这里不 sleep 首等，轮询间隔也压到 0.4 秒，尽快抓住那个窗口。
+    deadline = time.time() + 45
+    detail = {}
+    meta = {}
+    sources = []
+    slide_images = []
+    is_slides = False
+    dom_deadline = time.time() + 90   # 仅当接口没给直链时才启用
+
+    while time.time() < deadline:
+        probe = _probe_once(session, vid)
+        if not isinstance(probe, dict):
+            time.sleep(0.4)
+            continue
+
+        if probe.get('ok'):
+            # 接口数据每次都要覆盖成最新的 —— 互动数据是实时值
+            detail = probe
+            # 优先用接口直链；码率档位挑一份更高清的备选
+            api_urls = [u for u in (probe.get('apiVideoUrls') or []) if u]
+            if api_urls and not sources:
+                sources = api_urls
+                hi = [u for u in (probe.get('apiBitRateUrls') or []) if u]
+                if hi:
+                    sources = sources + hi[:3]
+
+        # ---- 图文合集：接口给了图就够，立刻返回 ----
+        # （图片是懒加载的，DOM 要 70 秒才渲染完，别等）
+        if detail.get('ok') and (detail.get('images') or []):
+            break
+
+        # ---- 视频：接口给了直链，立刻返回（不等 DOM）----
+        if detail.get('ok') and sources:
+            break
+
+        # 接口通了但没给直链（少见）：再等一会儿 DOM 播放器
+        if detail.get('ok') and not sources and time.time() < dom_deadline:
+            src = probe.get('videoSrc') or ''
+            if src:
+                sources = [src]
+                break
+
+        time.sleep(0.4)
+
+    # 统一成后面代码期望的字段名
+    meta['title'] = detail.get('desc') or ''
+    meta['author'] = detail.get('author') or ''
+    meta['cover'] = detail.get('cover') or ''
+    meta['dur'] = detail.get('duration') or 0
+    meta['api_stats'] = {
+        'likes': detail.get('likes') or 0,
+        'comments': detail.get('comments') or 0,
+        'shares': detail.get('shares') or 0,
+        'collects': detail.get('collects') or 0,
+    }
+    if not detail.get('ok'):
+        log_note = detail.get('apiStatus') or detail.get('err') or '未知原因'
+        print(f'[opencli] detail 接口未取到元数据（{log_note}），尝试纯 DOM 兜底',
+              file=sys.stderr)
+        # 接口整个拿不到（比如登录态失效）时，退回纯 DOM 读取
+        meta, sources, slide_images, is_slides = _dom_only_probe(
+            session, deadline=max(time.time() + 20, deadline)
+        )
+
+    api_images = detail.get('images') or []
 
     # 图文：接口给了图就够了，跳过整个 DOM 等待（图文页渲染要 70 秒）
     if api_images:
@@ -321,102 +513,32 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             'source': 'opencli',
         }
 
-    # 3) 非图文（或接口没给图）：从页面读播放器/兜底图片
-    deadline = time.time() + 40
-    sources = []
-    meta = {}
-    best_meta = {}
-    slide_images = []
-    is_slides = False
+    # 3) 非图文（或接口没给图）
+    #
+    # 走纯 DOM 兜底只有两种情况：接口彻底失败（上面已调 _dom_only_probe），
+    # 或者接口给了数据但页面还没渲染出播放器（极少见）。
+    # 正常情况下 meta / sources 已经在第 2 步的单循环里备好了，这里不再重复轮询。
+    if not sources and not slide_images:
+        log_note = detail.get('apiStatus') or detail.get('err') or '播放器未渲染'
+        print(f'[opencli] 页面未给出播放器直链（{log_note}），再试一轮 DOM',
+              file=sys.stderr)
+        dmeta, dsources, dimgs, dis_slides = _dom_only_probe(
+            session, deadline=time.time() + 15
+        )
+        if dsources:
+            sources = dsources
+        if dimgs:
+            slide_images, is_slides = dimgs, dis_slides
+        for k, v in (dmeta or {}).items():
+            if v and not meta.get(k):
+                meta[k] = v
 
-    while time.time() < deadline:
-        time.sleep(1.5)
-        raw = _run_opencli([
-            'browser', session, 'eval',
-            # 元数据提取（选择器均在真实页面验证过）：
-            #   author —— [data-e2e="user-info"] 里指向 /user/ 的链接文本
-            #             （旧的 video-author-name 已失效）
-            #   slides —— 图文轮播的图，尽量全取（不只第一张）
-            "JSON.stringify({src:[...document.querySelectorAll('video source')].map(s=>s.src),"
-            "cur:[...document.querySelectorAll('video')].map(v=>v.currentSrc),"
-            "title:document.title,"
-            "author:(()=>{const el=document.querySelector('[data-e2e=\"user-info\"]');"
-            "if(!el)return '';"
-            "const a=[...el.querySelectorAll('a[href*=\"/user/\"]')].find(x=>x.innerText.trim());"
-            "if(a)return a.innerText.trim();"
-            "const t=el.innerText.trim();"
-            "const mm=t.match(/^(.+?)(粉丝|获赞|关注)/);"
-            "return mm?mm[1].trim():'';})(),"
-            "dur:(document.querySelector('video')||{}).duration||0,"
-            # 图文：轮播图特征 URL 是 tplv-dy-aweme-images，容器是 player-container。
-            # （图文页也有 <video> 元素，所以不能靠「有没有 video」判断类型，
-            #   必须看有没有这组图。）
-            "slides:[...document.querySelectorAll('img')]"
-            ".filter(i=>i.src&&i.src.includes('aweme-images'))"
-            ".map(i=>i.src),"
-            "info:(()=>{const el=document.querySelector('[data-e2e=\"detail-video-info\"]');"
-            "return el?el.innerText.trim():'';})()})"
-        ], timeout=30)
-        data = _pick_source_json(raw)
-        if not isinstance(data, dict):
-            continue
-
-        meta = data
-        if data.get('author') or data.get('dur'):
-            best_meta = data
-        srcs = [s for s in (data.get('src') or []) if s and s.startswith('http')]
-        if srcs:
-            sources = srcs
-        imgs = [s for s in (data.get('slides') or []) if s and s.startswith('http')]
-
-        # 图文优先判定！
-        #
-        # ⚠️ 图文页里也有 <video> 元素（背景/占位），所以不能靠「有没有 video」
-        #    来区分类型，否则图文会被当成视频处理。
-        #    判据是那组 tplv-dy-aweme-images 的图。
-        #
-        # 这里也不追求把图收全 —— detail 接口会给完整图片列表，那才是权威来源。
-        # DOM 只用来「认出这是图文」，探到就够，省下十几秒等待。
-        if imgs:
-            slide_images = imgs
-            is_slides = True
-            break
-
-        # 视频：拿到直链就够，元数据统一由 detail 接口补
-        if srcs:
-            break
-
-    # 合并元数据：优先用信息更全的那份
-    merged = dict(meta)
-    for k, v in (best_meta or {}).items():
-        if v and not merged.get(k):
-            merged[k] = v
-    meta = merged
-
-    # ---------- 权威元数据：detail 接口（前面已取过，这里直接复用） ----------
+    # ---------- 权威元数据：detail 接口（第 2 步已取，这里直接复用） ----------
     # DOM 上分不清「本作品」和「右侧推荐」，封面也拿错过。
     # 接口返回的才是准确数据。
-    if detail.get('ok'):
-        if detail.get('author'):
-            meta['author'] = detail['author']
-        if detail.get('cover'):
-            meta['cover'] = detail['cover']
-        if detail.get('desc'):
-            meta['title'] = detail['desc']
-        if detail.get('duration'):
-            meta['dur'] = detail['duration']
-        api_images = detail.get('images') or []
-        meta['api_stats'] = {
-            'likes': detail.get('likes') or 0,
-            'comments': detail.get('comments') or 0,
-            'shares': detail.get('shares') or 0,
-            'collects': detail.get('collects') or 0,
-        }
-    else:
-        log_note = detail.get('status') or detail.get('err') or '未知原因'
-        print(f'[opencli] detail 接口未取到元数据（{log_note}），沿用页面数据', file=sys.stderr)
-
     # ---------- 图文作品（接口没给图，但页面抓到了） ----------
+    # 接口有图的路径在上面第 2 步就 return 了。走到这里说明接口没给图，
+    # 但 DOM 认出了图文轮播图，用 DOM 的图作为兜底。
     if api_images or (is_slides and slide_images):
         uniq = _dedup_images(api_images or slide_images)
         if not uniq:

@@ -217,5 +217,8 @@ export default {
   // 获取完整URL
   getFullUrl: (path) => {
     return BASE_URL + path
-  }
+  },
+
+  // API基础地址（异步轮询等场景需要）
+  baseUrl: BASE_URL
 }

@@ -6,6 +6,11 @@ const CACHE_PREFIX = 'douyin';
 const RESOLVER_HOST = process.env.DOUYIN_RESOLVER_HOST || 'http://localhost:3008';
 
 class DouyinService {
+  // 缓存 key 生成（异步任务模块复用，保证两边口径一致）
+  cacheKeyOf(url, cookie = '') {
+    return `${CACHE_PREFIX}:parse:${md5(url + cookie)}`;
+  }
+
   // 验证用户提供的抖音 Cookie 是否有效（不存储，各用户用自己的）
   async checkCookieStatus(cookie) {
     if (!cookie) {
@@ -56,7 +61,7 @@ class DouyinService {
       console.log(`[Douyin] Extracted URL: ${url}`);
 
       // 尝试从缓存获取（缓存 key 含 cookie 指纹，避免不同用户结果串用）
-      const cacheKey = `${CACHE_PREFIX}:parse:${md5(url + userCookie)}`;
+      const cacheKey = this.cacheKeyOf(url, userCookie);
       const cachedResult = await cache.get(cacheKey);
       if (cachedResult) {
         console.log(`[Douyin] Cache HIT: ${cacheKey}`);

@@ -95,7 +95,7 @@
 <script setup>
 import { ref, computed } from 'vue';
 import { onShareAppMessage, onShareTimeline } from '@dcloudio/uni-app';
-import { parseDouyinUrl, getDouyinDownloadUrl } from '@/api/douyin';
+import { parseDouyinUrl, queryDouyinTask, getDouyinDownloadUrl } from '@/api/douyin';
 import request from '@/utils/request';
 
 const shareUrl = ref('');
@@ -163,6 +163,15 @@ const copyText = () => {
 };
 
 // 解析链接
+//
+// 走异步流程：提交任务拿 taskId → 轮询取结果。
+// 解析要几十秒，公网经过 Cloudflare 代理会被 100 秒超时掐断，
+// 同步接口在公网拿不到结果，只能这么来。
+const POLL_INTERVAL = 3000;   // 轮询间隔 3 秒
+const POLL_MAX_WAIT = 180000; // 最多等 3 分钟
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const parseUrl = async () => {
   if (!shareUrl.value.trim()) {
     uni.showToast({ title: '请输入链接', icon: 'none' });
@@ -172,10 +181,50 @@ const parseUrl = async () => {
   loading.value = true;
 
   try {
-    // 无需 cookie —— 后端走浏览器通道，靠服务端浏览器的登录态取无水印直链
-    const res = await parseDouyinUrl(shareUrl.value.trim());
-    videoInfo.value = res.data;
-    uni.showToast({ title: '解析成功', icon: 'success' });
+    // 1. 提交任务，秒回 taskId
+    const submitRes = await parseDouyinUrl(shareUrl.value.trim());
+    const task = submitRes?.data || {};
+
+    // 命中缓存：后端直接给了终态，不用轮询
+    if (task.status === 'done' && task.data) {
+      videoInfo.value = task.data;
+      uni.showToast({ title: '解析成功', icon: 'success' });
+      return;
+    }
+
+    if (!task.taskId) {
+      throw new Error('提交解析失败，请重试');
+    }
+
+    // 2. 轮询取结果
+    const deadline = Date.now() + POLL_MAX_WAIT;
+    while (Date.now() < deadline) {
+      await sleep(POLL_INTERVAL);
+
+      let res;
+      try {
+        res = await queryDouyinTask(task.taskId);
+      } catch (e) {
+        // 单次轮询失败（网络抖动）不打断整体流程，继续试
+        console.warn('轮询失败，继续重试:', e?.message);
+        continue;
+      }
+
+      const info = res?.data || {};
+
+      if (info.status === 'done' && info.data) {
+        videoInfo.value = info.data;
+        uni.showToast({ title: '解析成功', icon: 'success' });
+        return;
+      }
+
+      if (info.status === 'failed') {
+        throw new Error(info.error || '解析失败');
+      }
+      // status === 'pending' -> 继续等
+    }
+
+    throw new Error('解析超时，请稍后重试');
   } catch (e) {
     console.error('解析失败:', e);
     uni.showToast({ title: e?.message || '解析失败', icon: 'none' });

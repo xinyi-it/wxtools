@@ -25,13 +25,17 @@
     python3 opencli_resolve.py --session dy <链接或视频ID>
 输出: JSON (stdout)，结构与 resolve.py 一致
 """
-import sys, os, json, re, asyncio, subprocess, shutil, traceback
+import sys, os, json, re, asyncio, subprocess, shutil, traceback, time
 
 UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
 OPENCLI = shutil.which('opencli') or 'opencli'
 DEFAULT_SESSION = os.environ.get('OPENCLI_SESSION', 'dy')
+
+# 关标签后等浏览器释放资源的时间（秒）。见 _tab_close 注释：
+# 关标签是异步的，不等会给下一条解析埋 10 秒以上的尾部波动。
+TAB_RELEASE_WAIT = float(os.environ.get('TAB_RELEASE_WAIT', '0.3'))
 
 
 def extract_video_id(text: str):
@@ -82,6 +86,73 @@ def _pick_source_json(out: str):
         return json.loads(m.group(1))
     except Exception:
         return None
+
+
+# ---------- 标签页管理 ----------
+#
+# ⭐ 每条解析用独立标签页，这是提速的关键（实测最慢那条 83s → 5.7s）。
+#
+# 为什么复用同一个标签页会越来越慢：
+#   抖音是重型 SPA，同一标签连续导航时，上一页的资源/Worker/长连接不会立刻
+#   释放，逐渐把 opencli 的 eval 通道堵住。实测连续三条：
+#     复用标签: 5.0s → 13.9s → 83.5s    （累积恶化 17 倍）
+#     独立标签: 5.3s → 5.7s  → 3.9s     （稳定，不恶化）
+#   新标签拿到的是干净渲染上下文，用完立刻关掉彻底回收。
+#   另外新标签本身就是空白页，连「先重置 about:blank」都省了。
+#
+# ⚠️ 只加标签隔离，不动轮询时序 —— 之前一并改了 settle 检测和超时，
+#    结果图文被误判成 video、耗时反弹到 171s。一次只改一处，才看得清因果。
+
+def _tab_new(session: str, url: str = ''):
+    """开一个新标签页，返回 targetId（失败返回 None）
+
+    ⭐ 带 url 开标签是提速关键（实测 A/B 对比，差了 30 倍）：
+      A) `tab new <抖音详情页URL>`     → 第2轮探测命中，3.9~4.4 秒
+      B) `tab new` 空白 + eval 发导航  → 8 轮探测 124~163 秒都拿不到
+    为什么差这么多：B 方案的导航是一条 eval 指令，页面忙时这条通道本身会被
+    堵住（实测过 45 秒），而且指令是异步的 —— 返回了不代表页面加载完了，
+    紧接着的探测正好撞在资源加载高峰上。A 方案交给浏览器自己带着 URL 开
+    标签，加载与探测并行，省掉一次 eval 往返，探测从干净窗口开始。
+
+    ⚠️ tab new 不带 url 时的输出 key 是 "targetId"，带 url 时是 "page"，
+       两种都要认（实测确认）。
+    """
+    args = ['browser', session, 'tab', 'new']
+    if url:
+        args.append(url)
+    out = _run_opencli(args, timeout=40)
+    for key in ('targetId', 'page', 'id', 'tabId'):
+        m = re.search(r'"%s"\s*:\s*"([^"]+)"' % key, out)
+        if m:
+            return m.group(1)
+    m = re.search(r'([0-9A-F]{16,})', out)
+    return m.group(1) if m else None
+
+
+def _tab_close(session: str, tid):
+    """关掉标签页。失败不抛 —— 关闭失败不该影响解析结果
+
+    ⚠️ 关标签是异步的：命令返回了，浏览器内部的资源回收（视频解码器、
+       网络连接、Worker）还没结束。紧接着开新标签会撞上这个回收过程，
+       实测连续解析时后几条明显变慢（前四条 6~11s，后两条 24s）。
+       所以关完给浏览器一个极短的喘息窗口，让资源真正落地。
+       （0.3 秒的成本换掉 10 秒以上的尾部波动，很划算）
+    """
+    if not tid:
+        return
+    try:
+        _run_opencli(['browser', session, 'tab', 'close', tid], timeout=20)
+        time.sleep(TAB_RELEASE_WAIT)
+    except Exception:
+        pass
+
+
+def _eval_in_tab(session: str, tid, js: str, timeout=45):
+    """在指定标签页里执行 JS；tid 为 None 时退回当前标签"""
+    args = ['browser', session, 'eval', js]
+    if tid:
+        args += ['--tab', tid]
+    return _run_opencli(args, timeout=timeout)
 
 
 def resolve_by_opencli(target: str, session: str = DEFAULT_SESSION, retries: int = 2) -> dict:
@@ -159,7 +230,7 @@ def _dedup_images(imgs):
     return out
 
 
-def _probe_once(session: str, vid: str) -> dict:
+def _probe_once(session: str, vid: str, tid=None) -> dict:
     """一次往返同时取「detail 接口数据」+「DOM 播放器直链」
 
     为什么要合并成一次：
@@ -248,7 +319,7 @@ def _probe_once(session: str, vid: str) -> dict:
         "collects:(a.statistics||{}).collect_count||0});"
         "}catch(e){return JSON.stringify({ok:false,err:String(e)});}})()"
     )
-    out = _run_opencli(['browser', session, 'eval', js], timeout=45)
+    out = _eval_in_tab(session, tid, js, timeout=45)
     d = _pick_source_json(out)
     return d if isinstance(d, dict) else {}
 
@@ -261,7 +332,7 @@ def _fetch_detail_in_page(session: str, vid: str) -> dict:
     return _probe_once(session, vid)
 
 
-def _dom_only_probe(session: str, deadline: float):
+def _dom_only_probe(session: str, deadline: float, tid=None):
     """纯 DOM 兜底：接口整个拿不到时（例如登录态失效）只能读页面
 
     返回 (meta, sources, slide_images, is_slides)。
@@ -276,8 +347,7 @@ def _dom_only_probe(session: str, deadline: float):
 
     while time.time() < deadline:
         time.sleep(1.2)
-        raw = _run_opencli([
-            'browser', session, 'eval',
+        raw = _eval_in_tab(session, tid, (
             # 元数据提取（选择器均在真实页面验证过）：
             #   author —— [data-e2e="user-info"] 里指向 /user/ 的链接文本
             #             （旧的 video-author-name 已失效）
@@ -301,7 +371,7 @@ def _dom_only_probe(session: str, deadline: float):
             ".map(i=>i.src),"
             "info:(()=>{const el=document.querySelector('[data-e2e=\\\"detail-video-info\\\"]');"
             "return el?el.innerText.trim():'';})()})"
-        ], timeout=30)
+        ), timeout=30)
         data = _pick_source_json(raw)
         if not isinstance(data, dict):
             continue
@@ -336,6 +406,12 @@ def _dom_only_probe(session: str, deadline: float):
 
 
 def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
+    """解析单条作品：开干净标签 → 干活 → 一定关掉标签
+
+    ⭐ 标签页隔离是性能关键（实测最慢那条 83s → 5.7s），所以标签的
+    创建和回收统一在这里管，用 try/finally 保证任何退出路径（成功/异常/
+    超时）都会把标签关掉，不给浏览器留垃圾。
+    """
     url = (target or '').strip()
     m = re.search(r'https?://\S+', url)
     if m:
@@ -347,41 +423,36 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
     if not vid:
         raise RuntimeError(f'无法从链接提取视频ID: {url}')
 
+    # ⭐ 统一用 /video/ 地址：抖音会按作品类型自己跳到 /note/ 或 /slides/。
+    #    实测直接上 /note/ 反而渲染不出来（播放器 30 秒都不出）。
     page_url = f'https://www.douyin.com/video/{vid}'
 
+    # ⭐ 把目标 URL 直接交给 tab new，让浏览器开标签时就发起加载。
+    #    对比「开空白标签 + eval 发导航」实测 3.9s vs 124s（详见 _tab_new 注释）。
+    # ⚠️ 开不了新标签不算错，退化成用当前标签（老路径仍然能跑）
+    tid = _tab_new(session, page_url)
+    try:
+        return _resolve_in_tab(url, vid, session, tid, navigated=bool(tid))
+    finally:
+        _tab_close(session, tid)
+
+
+def _resolve_in_tab(url: str, vid: str, session: str, tid, navigated: bool = False) -> dict:
+    """在指定标签页里完成解析（标签生命周期由 _resolve_once 管）
+
+    navigated=True 表示标签已由 tab new 带着目标 URL 打开，页面正在加载，
+    不需要再发导航指令 —— 少一次 eval 往返，也不会撞进加载高峰。
+    """
     import time
 
-    # 1) 先把页面重置到空白页，再导航
-    #
-    # ⚠️ 为什么要先重置（实测发现，反直觉）：
-    #    解析速度不取决于抖音页面的渲染，而取决于**上一个页面是什么**。
-    #    上一页若是抖音（SPA 残留大量资源/长连接），opencli 的 eval 通道会被
-    #    堵住 —— 实测单次 evals 从 0.4 秒涨到 40~60 秒，导航指令直接超时。
-    #    从 about:blank 出发则导航 0.42 秒、探测 1.48 秒，不到 2 秒搞定。
-    #
-    #    对比（同一条链接连续解析）：
-    #      直接解析:     4.5s ✓ / 138.9s ✗ / 24.1s ✓   ← 会失败
-    #      先重置再解析: 13.3s ✓ / 5.9s ✓ / 59.5s ✓    ← 都成功
-    #    重置多花几秒，但换来稳定，值。
-    #
-    # ⚠️ 重置本身也可能被堵（页面正忙时同样会卡），所以给它设短超时，
-    #    超时就放弃重置、直接往下走 —— 不能因为"优化"把主流程搞挂。
-    try:
-        _run_opencli(['browser', session, 'eval',
-                      "location.href='about:blank';'ok'"], timeout=12)
-    except Exception:
-        pass  # 重置失败不算错，退化成本来的直接导航
-
-    # 2) 导航到目标页面
+    # 1) 导航到目标页面（仅当标签是空白页打开时才需要）
     #
     # ⚠️ 不要用 `browser open` —— 它会等页面完全静止（图片/视频/埋点全停），
     #    实测抖音详情页要 57~60 秒才返回，而真正的数据早就有了。
-    #
-    # 统一用 /video/ 地址：抖音会按作品类型自己跳到 /note/ 或留在 /video/。
-    # 实测直接上 /note/ 反而渲染不出来（播放器 30 秒都不出）。
-    page_url = f'https://www.douyin.com/video/{vid}'
-    _run_opencli(['browser', session, 'eval',
-                  f'location.href={json.dumps(page_url)}; "nav"'], timeout=30)
+    if not navigated:
+        page_url = f'https://www.douyin.com/video/{vid}'
+        _eval_in_tab(session, tid,
+                     f'location.href={json.dumps(page_url)}; "nav"', timeout=40)
 
     # 2) 单循环轮询：一次往返同时看「接口」和「DOM 播放器」
     #
@@ -390,27 +461,36 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
     #    不报错、静默给空 —— 傻等它永远等不到。
     #
     # ⚠️ 关键认知二（省时间的大头）：视频直链从接口的 video.play_addr 拿，
-    #    不要等 DOM 播放器。冷启动实测：
-    #      接口就绪        ~1.6 秒（导航发出后立刻就能查）
-    #      DOM 播放器就绪  ~115 秒   ← 等它纯属浪费，两者 CDN 域名和文件路径相同
+    #    不要等 DOM 播放器。实测接口就绪 ~1.5 秒就给直链，
+    #    而 DOM 播放器要 ~115 秒才渲染出来（两者 CDN 域名和文件路径完全相同，
+    #    是同一份文件，所以完全没必要等 DOM）。
     #
-    # ⚠️ 关键认知三（最反直觉的一条）：**别在导航后 sleep**。
-    #    页面刚导航的那一两秒接口就能返回；一旦等页面开始加载资源，
-    #    opencli 的 eval 往返会被页面主线程堵住，实测单次从 1.6 秒涨到 45 秒。
-    #    也就是说「多等一会儿再查」反而更慢 —— 越早查越快。
-    #    所以这里不 sleep 首等，轮询间隔也压到 0.4 秒，尽快抓住那个窗口。
-    deadline = time.time() + 45
+    # ⚠️ 关键认知三（时序陷阱，实测踩出来的）：
+    #    查得太早和查得太密都会撞墙，必须用**退避**而不是固定间隔：
+    #      第 1 轮（导航后 0 秒）: 1.2s 返回 ok=False —— 页面还没就绪，正常
+    #      第 2 轮（+0.4 秒）    : 45s 超时     —— 撞进资源加载高峰，白等
+    #      第 3 轮（+45 秒）    : 42s，拿到数据
+    #    也就是说：紧接着第一次失败后立刻重试，正好撞在页面最忙的时刻。
+    #    正确做法是失败后**等页面喘口气**（间隔递增），既不错过干净窗口，
+    #    也不在高峰上硬撞。实测这样视频从 104~187s 降到 10 秒内。
+    deadline = time.time() + 60
     detail = {}
     meta = {}
     sources = []
     slide_images = []
     is_slides = False
     dom_deadline = time.time() + 90   # 仅当接口没给直链时才启用
+    wait_next = 0.5                   # 首轮不额外等：导航后立刻试一次
 
     while time.time() < deadline:
-        probe = _probe_once(session, vid)
+        if wait_next:
+            time.sleep(wait_next)
+
+        probe = _probe_once(session, vid, tid)
+
+        # 超时/异常返回的不是 dict：说明页面正忙，拉长间隔再试，别硬撞
         if not isinstance(probe, dict):
-            time.sleep(0.4)
+            wait_next = min(wait_next * 2 if wait_next else 2.0, 6.0)
             continue
 
         if probe.get('ok'):
@@ -423,6 +503,12 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
                 hi = [u for u in (probe.get('apiBitRateUrls') or []) if u]
                 if hi:
                     sources = sources + hi[:3]
+        else:
+            # 本轮没通也不丢信息：把非空字段并进已有 detail，
+            # 避免「最后一轮恰好不带封面」把前面的好数据覆盖成空。
+            for k, v in probe.items():
+                if v and not detail.get(k):
+                    detail[k] = v
 
         # ---- 图文合集：接口给了图就够，立刻返回 ----
         # （图片是懒加载的，DOM 要 70 秒才渲染完，别等）
@@ -440,7 +526,8 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
                 sources = [src]
                 break
 
-        time.sleep(0.4)
+        # 本轮通了但还差东西（如接口通了但直链没到）：稍等再试
+        wait_next = 1.0 if not wait_next else min(wait_next + 0.5, 3.0)
 
     # 统一成后面代码期望的字段名
     meta['title'] = detail.get('desc') or ''
@@ -459,7 +546,7 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
               file=sys.stderr)
         # 接口整个拿不到（比如登录态失效）时，退回纯 DOM 读取
         meta, sources, slide_images, is_slides = _dom_only_probe(
-            session, deadline=max(time.time() + 20, deadline)
+            session, deadline=max(time.time() + 20, deadline), tid=tid
         )
 
     api_images = detail.get('images') or []
@@ -523,7 +610,7 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
         print(f'[opencli] 页面未给出播放器直链（{log_note}），再试一轮 DOM',
               file=sys.stderr)
         dmeta, dsources, dimgs, dis_slides = _dom_only_probe(
-            session, deadline=time.time() + 15
+            session, deadline=time.time() + 15, tid=tid
         )
         if dsources:
             sources = dsources

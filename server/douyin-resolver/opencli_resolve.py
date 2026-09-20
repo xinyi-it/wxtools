@@ -148,6 +148,49 @@ def _parse_stats(info: str) -> dict:
     return out
 
 
+def _fetch_detail_in_page(session: str, vid: str) -> dict:
+    """在浏览器页面上下文里调 aweme/detail 接口，拿权威元数据
+
+    为什么必须走这条路：
+      页面上那些 img/背景图不区分「本条作品」和「右侧推荐」，取到的常常是
+      related 视频的缩略图（URL 里带 PackSourceEnum_WEBPC_RELATED_AWEME）。
+      实测拿错过封面 —— 取到的是推荐位另一条视频的图。
+      而 detail 接口返回的 cover 带 PackSourceEnum_AWEME_DETAIL，
+      是这条作品自己的封面，唯一可靠来源。
+
+    注意：接口要在页面上下文里 fetch（带登录态 + 页面自带的签名逻辑），
+         从容器/命令行裸调会因签名失效返回空 body。
+    """
+    js = (
+        "(async()=>{try{"
+        "const u='https://www.douyin.com/aweme/v1/web/aweme/detail/"
+        "?device_platform=webapp&aid=6383&channel=channel_pc_web&aweme_id=" + vid +
+        "&request_source=600&origin_type=video_page&pc_client_type=1"
+        "&version_code=170400&version_name=17.4.0&cookie_enabled=true"
+        "&platform=PC&downlink=10&effective_type=4g&round_trip_time=50';"
+        "const r=await fetch(u,{credentials:'include'});"
+        "const j=await r.json();"
+        "const a=j.aweme_detail||{};"
+        "if(!a.aweme_id)return JSON.stringify({ok:false,status:r.status});"
+        "const v=a.video||{};"
+        "const pick=o=>{o=o||{};const l=o.url_list||[];return l[0]||'';};"
+        "return JSON.stringify({ok:true,"
+        "desc:a.desc||'',"
+        "author:(a.author||{}).nickname||'',"
+        "cover:pick(v.cover)||pick(v.origin_cover)||'',"
+        "origin_cover:pick(v.origin_cover)||'',"
+        "duration:(v.duration||0)/1000,"
+        "likes:(a.statistics||{}).digg_count||0,"
+        "comments:(a.statistics||{}).comment_count||0,"
+        "shares:(a.statistics||{}).share_count||0,"
+        "collects:(a.statistics||{}).collect_count||0});"
+        "}catch(e){return JSON.stringify({ok:false,err:String(e)});}})()"
+    )
+    out = _run_opencli(['browser', session, 'eval', js], timeout=60)
+    d = _pick_source_json(out)
+    return d if isinstance(d, dict) else {}
+
+
 def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
     url = (target or '').strip()
     m = re.search(r'https?://\S+', url)
@@ -240,6 +283,31 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             merged[k] = v
     meta = merged
 
+    # ---------- 权威元数据：detail 接口 ----------
+    # DOM 上的封面分不清「本作品」和「右侧推荐」，实测拿错过。
+    # 接口返回的才靠谱（封面带 PackSourceEnum_AWEME_DETAIL）。
+    # 拿不到也不致命，继续用 DOM 那份兜着。
+    detail = _fetch_detail_in_page(session, vid)
+    if detail.get('ok'):
+        if detail.get('author'):
+            meta['author'] = detail['author']
+        if detail.get('cover'):
+            meta['cover'] = detail['cover']
+        if detail.get('desc'):
+            meta['title'] = detail['desc']
+        if detail.get('duration'):
+            meta['dur'] = detail['duration']
+        # 接口的统计数字比解析页面文本更准
+        meta['api_stats'] = {
+            'likes': detail.get('likes') or 0,
+            'comments': detail.get('comments') or 0,
+            'shares': detail.get('shares') or 0,
+            'collects': detail.get('collects') or 0,
+        }
+    else:
+        log_note = detail.get('status') or detail.get('err') or '未知原因'
+        print(f'[opencli] detail 接口未取到元数据（{log_note}），沿用页面数据', file=sys.stderr)
+
     # ---------- 图文笔记分支 ----------
     # 图文没有播放地址，走图片列表返回（结构对齐 resolve.py 的 type=images）
     if is_slides and not sources:
@@ -255,7 +323,7 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             uniq.append(u)
         if not uniq:
             raise RuntimeError('图文笔记未取到图片（Chrome 未登录抖音，或页面未渲染）')
-        st = _parse_stats(meta.get('info') or '')
+        st = meta.get('api_stats') or _parse_stats(meta.get('info') or '')
         return {
             'id': vid,
             'type': 'images',
@@ -294,7 +362,7 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
     except Exception:
         dur_ms = 0
 
-    st = _parse_stats(meta.get('info') or '')
+    st = meta.get('api_stats') or _parse_stats(meta.get('info') or '')
 
     return {
         'id': vid,

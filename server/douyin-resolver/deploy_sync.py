@@ -38,8 +38,15 @@ def sh(cmd, timeout=600):
 
 def http(url, method='GET', payload=None, timeout=30):
     data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={'Content-Type': 'application/json'})
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={
+            'Content-Type': 'application/json',
+            # 带个正常 UA：裸 urllib 的默认 UA 会被 Cloudflare 判可疑，偶发 403
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                          'AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/120.0.0.0 Safari/537.36',
+        })
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode('utf-8'))
 

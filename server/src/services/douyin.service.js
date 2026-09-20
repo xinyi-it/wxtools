@@ -131,12 +131,19 @@ class DouyinService {
   }
 
   // 从分享文本中提取抖音链接
+  //
+  // 覆盖场景（实测过）：
+  //   - 短链 v.douyin.com/xxx（含 - 和 _ 的 ID，别用 [A-Za-z0-9] 掐断）
+  //   - 网页版 /video/ 、 /note/（图文）
+  //   - 分享页 iesdouyin.com/share/{video,note}/
+  //   - 详情页弹层 ?modal_id=xxx（在别的页面点开视频时的地址）
   extractUrl(text) {
     const patterns = [
-      /https?:\/\/v\.douyin\.com\/[a-zA-Z0-9_-]+\/?/,
-      /https?:\/\/www\.douyin\.com\/video\/\d+/,
-      /https?:\/\/www\.iesdouyin\.com\/share\/(video|note)\/\d+/,
-      /https?:\/\/iesdouyin\.com\/share\/(video|note)\/\d+/,
+      /https?:\/\/v\.douyin\.com\/[a-zA-Z0-9_-]+/,
+      /https?:\/\/(?:www\.)?douyin\.com\/(?:video|note)\/\d+/,
+      /https?:\/\/(?:www\.)?iesdouyin\.com\/share\/(?:video|note)\/\d+/,
+      // 弹层地址：modal_id 才是作品 ID
+      /https?:\/\/(?:www\.)?douyin\.com\/[^\s]*[?&]modal_id=\d+/,
     ];
 
     for (const pattern of patterns) {

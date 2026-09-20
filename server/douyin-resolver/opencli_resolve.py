@@ -148,6 +148,21 @@ def _parse_stats(info: str) -> dict:
     return out
 
 
+def _dedup_images(imgs):
+    """图片去重：同一张图常有多种尺寸/格式后缀（~tplv-xxx.webp / .jpeg）"""
+    seen = set()
+    out = []
+    for u in imgs:
+        if not u:
+            continue
+        key = re.sub(r'~\w+\.(jpe?g|png|webp|heic)', '', u)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(u)
+    return out
+
+
 def _fetch_detail_in_page(session: str, vid: str) -> dict:
     """在浏览器页面上下文里调 aweme/detail 接口，拿权威元数据
 
@@ -225,13 +240,52 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
     #
     # ⚠️ 不要用 `browser open` —— 它会等页面完全静止（图片/视频/埋点全停），
     #    实测抖音详情页要 57 秒才返回，而真正的数据早就有了。
-    #    改成发一条导航指令（0.5 秒返回），然后自己轮询读取，13 秒就能出结果。
+    #    改成发一条导航指令（0.5 秒返回），然后自己轮询读取。
+    #
+    # 统一用 /video/ 地址：抖音会按作品类型自己跳到 /note/ 或留在 /video/。
+    # 实测直接上 /note/ 反而渲染不出来（播放器 30 秒都不出）。
+    page_url = f'https://www.douyin.com/video/{vid}'
     _run_opencli(['browser', session, 'eval',
                   f'location.href={json.dumps(page_url)}; "nav"'], timeout=30)
-    time.sleep(2)
+    time.sleep(1.5)
 
-    # 2) 等页面把播放器/图片渲染出来
-    #    视频看 <video><source>，图文看轮播图；哪边先出就按哪边处理。
+    # 2) 先问接口 —— 图文作品的完整图片列表只有接口有（DOM 里是懒加载的）。
+    #    接口能秒回，拿到了就直接用，不必等页面慢慢渲染。
+    detail = _fetch_detail_in_page(session, vid)
+    api_images = []
+    if detail.get('ok'):
+        api_images = detail.get('images') or []
+
+    # 图文：接口给了图就够了，跳过整个 DOM 等待（图文页渲染要 70 秒）
+    if api_images:
+        st = {
+            'likes': detail.get('likes') or 0,
+            'comments': detail.get('comments') or 0,
+            'shares': detail.get('shares') or 0,
+            'collects': detail.get('collects') or 0,
+        }
+        imgs = _dedup_images(api_images)
+        title = (detail.get('desc') or '').strip()
+        return {
+            'id': vid,
+            'type': 'images',
+            'title': title,
+            'author': (detail.get('author') or '').strip(),
+            'cover': (detail.get('cover') or '').strip() or (imgs[0] if imgs else ''),
+            'musicUrl': (detail.get('music') or '').strip(),
+            'musicTitle': (detail.get('music_title') or '').strip(),
+            'duration': 0,
+            'likes': st['likes'],
+            'comments': st['comments'],
+            'shares': st['shares'],
+            'collects': st['collects'],
+            'images': imgs,
+            'imageCount': len(imgs),
+            'awemeType': detail.get('aweme_type'),
+            'source': 'opencli',
+        }
+
+    # 3) 非图文（或接口没给图）：从页面读播放器/兜底图片
     deadline = time.time() + 40
     sources = []
     meta = {}
@@ -258,13 +312,12 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             "const mm=t.match(/^(.+?)(粉丝|获赞|关注)/);"
             "return mm?mm[1].trim():'';})(),"
             "dur:(document.querySelector('video')||{}).duration||0,"
-            # 图文：轮播容器里所有图（含懒加载的 data-src）
-            "slides:[...document.querySelectorAll("
-            "'[data-e2e=\"slides-item\"] img, [class*=slides] img, "
-            "[class*=swiper-slide] img, [class*=image-carousel] img')]"
-            ".map(i=>i.currentSrc||i.src||i.getAttribute('data-src')||'')"
-            ".filter(s=>s&&s.startsWith('http')),"
-            "imgCount:document.querySelectorAll('[class*=swiper-slide]').length,"
+            # 图文：轮播图特征 URL 是 tplv-dy-aweme-images，容器是 player-container。
+            # （图文页也有 <video> 元素，所以不能靠「有没有 video」判断类型，
+            #   必须看有没有这组图。）
+            "slides:[...document.querySelectorAll('img')]"
+            ".filter(i=>i.src&&i.src.includes('aweme-images'))"
+            ".map(i=>i.src),"
             "info:(()=>{const el=document.querySelector('[data-e2e=\"detail-video-info\"]');"
             "return el?el.innerText.trim():'';})()})"
         ], timeout=30)
@@ -280,15 +333,18 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             sources = srcs
         imgs = [s for s in (data.get('slides') or []) if s and s.startswith('http')]
 
-        # 图文页没有播放器；只要探到图就按图文处理，别硬等播放器
-        if imgs and not srcs:
+        # 图文优先判定！
+        #
+        # ⚠️ 图文页里也有 <video> 元素（背景/占位），所以不能靠「有没有 video」
+        #    来区分类型，否则图文会被当成视频处理。
+        #    判据是那组 tplv-dy-aweme-images 的图。
+        #
+        # 这里也不追求把图收全 —— detail 接口会给完整图片列表，那才是权威来源。
+        # DOM 只用来「认出这是图文」，探到就够，省下十几秒等待。
+        if imgs:
             slide_images = imgs
             is_slides = True
-            # 轮播可能还没全部渲染，等多一拍把后面的图收全
-            if len(imgs) >= (data.get('imgCount') or 0) or len(imgs) >= 18:
-                break
-            time.sleep(1.5)
-            continue
+            break
 
         # 视频：拿到直链就够，元数据统一由 detail 接口补
         if srcs:
@@ -301,12 +357,9 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             merged[k] = v
     meta = merged
 
-    # ---------- 权威元数据：detail 接口 ----------
-    # DOM 上分不清「本作品」和「右侧推荐」，封面也拿错过；
-    # 图文的轮播图是懒加载的，DOM 里只能看到第一张。
-    # 接口返回的才是完整、准确的数据。
-    detail = _fetch_detail_in_page(session, vid)
-    api_images = []
+    # ---------- 权威元数据：detail 接口（前面已取过，这里直接复用） ----------
+    # DOM 上分不清「本作品」和「右侧推荐」，封面也拿错过。
+    # 接口返回的才是准确数据。
     if detail.get('ok'):
         if detail.get('author'):
             meta['author'] = detail['author']
@@ -327,19 +380,9 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
         log_note = detail.get('status') or detail.get('err') or '未知原因'
         print(f'[opencli] detail 接口未取到元数据（{log_note}），沿用页面数据', file=sys.stderr)
 
-    # ---------- 图文作品 ----------
-    # 判定优先级：接口给了 images 就用它（完整列表）；否则退回 DOM 抓到的图。
+    # ---------- 图文作品（接口没给图，但页面抓到了） ----------
     if api_images or (is_slides and slide_images):
-        imgs = api_images or slide_images
-        # 去重（同一张图常有多种尺寸后缀）
-        seen = set()
-        uniq = []
-        for u in imgs:
-            key = re.sub(r'~\w+\.(jpe?g|png|webp|heic)', '', u)
-            if key in seen:
-                continue
-            seen.add(key)
-            uniq.append(u)
+        uniq = _dedup_images(api_images or slide_images)
         if not uniq:
             raise RuntimeError('图文作品未取到图片')
         st = meta.get('api_stats') or _parse_stats(meta.get('info') or '')
@@ -350,7 +393,8 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             'title': title,
             'author': (meta.get('author') or '').strip(),
             'cover': (meta.get('cover') or '').strip() or uniq[0],
-            'musicUrl': '',
+            'musicUrl': (detail.get('music') or '').strip(),
+            'musicTitle': (detail.get('music_title') or '').strip(),
             'duration': 0,
             'likes': st['likes'],
             'comments': st['comments'],
@@ -358,6 +402,7 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             'collects': st['collects'],
             'images': uniq,
             'imageCount': len(uniq),
+            'awemeType': detail.get('aweme_type'),
             'source': 'opencli',
         }
 
@@ -380,6 +425,11 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
 
     # 优先 douyinvod（无水印 CDN）
     picked = next((s for s in sources if 'douyinvod' in s), sources[0])
+
+    # 去水印兜底：抖音部分直链走 /playwm/ 会带水印，换成 /play/ 即无水印。
+    # 正常拿到的 douyinvod 直链本来就没水印，这步只对少数退化情况生效。
+    if '/playwm/' in picked:
+        picked = picked.replace('/playwm/', '/play/')
 
     title = re.sub(r'\s*-\s*抖音\s*$', '', (meta.get('title') or '').strip())
     dur = meta.get('dur') or 0

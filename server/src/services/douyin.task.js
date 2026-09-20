@@ -76,8 +76,10 @@ async function loadTask(taskId) {
  * @returns {Promise<{taskId: string, status: string, cached: boolean}>}
  */
 async function submit(url, cookie = '') {
-  // 先把 URL 规范化（提取真实链接），避免前端传整段分享文案
-  const realUrl = douyinService.extractUrl(url) || url;
+  // 统一规范化（提取真实链接 + 去尾斜杠）。
+  // 必须和 parseShareUrl 用同一个口径，否则两边算出的缓存 key 对不上，
+  // 会出现「换链接仍返回上一条视频」的串用问题。
+  const realUrl = douyinService.normalizeUrl(url);
 
   // 已解析过的链接：直接给终态任务，前端第一次轮询就拿到结果
   const redis = getRedis();

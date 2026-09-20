@@ -179,6 +179,9 @@ const parseUrl = async () => {
   }
 
   loading.value = true;
+  // 立刻清掉上一条结果：否则解析失败或超时时，界面上还挂着上一个视频，
+  // 看着就像「换了链接还是上一个视频」。
+  videoInfo.value = null;
 
   try {
     // 1. 提交任务，秒回 taskId

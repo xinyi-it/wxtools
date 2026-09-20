@@ -6,9 +6,28 @@ const CACHE_PREFIX = 'douyin';
 const RESOLVER_HOST = process.env.DOUYIN_RESOLVER_HOST || 'http://localhost:3008';
 
 class DouyinService {
-  // 缓存 key 生成（异步任务模块复用，保证两边口径一致）
+  /**
+   * 缓存 key 生成
+   *
+   * ⚠️ 必须只以「规范化后的链接」算 key。
+   *    踩过的坑：一开始直接拿前端传的原始文案算 key，
+   *    同一视频传分享文案和传纯链接会得到两个不同的 key，
+   *    结果缓存读不到、写的也读不到，还会串用上一条视频的结果。
+   */
   cacheKeyOf(url, cookie = '') {
-    return `${CACHE_PREFIX}:parse:${md5(url + cookie)}`;
+    const norm = this.extractUrl(url) || (url || '').trim();
+    // 统一去掉结尾斜杠：v.douyin.com/xxx 和 v.douyin.com/xxx/ 视为同一条
+    const canonical = norm.replace(/\/+$/, '');
+    return `${CACHE_PREFIX}:parse:${md5(canonical + cookie)}`;
+  }
+
+  /**
+   * 规范化链接（提取真实抖音地址 + 去尾斜杠）
+   * 唯一入口，任何算 key 或比较链接的地方都用它。
+   */
+  normalizeUrl(url) {
+    const extracted = this.extractUrl(url) || (url || '').trim();
+    return extracted.replace(/\/+$/, '');
   }
 
   // 验证用户提供的抖音 Cookie 是否有效（不存储，各用户用自己的）
@@ -50,8 +69,8 @@ class DouyinService {
     try {
       console.log(`[Douyin] 原始输入: ${shareUrl}`);
 
-      // 从分享文本中提取链接
-      const url = this.extractUrl(shareUrl);
+      // 从分享文本中提取链接（统一走 normalizeUrl，保证与缓存 key 口径一致）
+      const url = this.normalizeUrl(shareUrl);
       if (!url) {
         console.error(`[Douyin] URL提取失败，原始内容: ${shareUrl}`);
         const error = new Error('未找到有效的抖音链接');

@@ -3,12 +3,22 @@
 抖音无水印视频解析 HTTP 服务
 为 wxtools 提供抖音无水印解析能力。
 
-双通道设计：
-  1. 主通道 resolve.py —— 直连抖音 web 详情接口（快，元数据全）
-  2. 兜底 opencli_resolve.py —— 用真实浏览器打开视频页读播放地址
-     （接口被风控挡住时自动切换；需要宿主机 Chrome 已登录抖音 + opencli 可用）
+三通道设计（按速度排序，逐级降级）：
+  1. SSR 通道 ssr_resolve.py —— 纯 HTTP 打 iesdouyin 分享页，读内联的
+     window._ROUTER_DATA。实测 3 秒，不需要任何浏览器/登录态。
+     ⚠️ 但它拿不到「动图标记 / 音乐直链 / 码率档位」——分享页数据结构精简掉了。
+  2. 接口通道 resolve.py —— 直连抖音 web 详情接口。
+     ⚠️ 已被风控锁死（200 空 body + 强制阻断），保留仅作历史参考。
+  3. 兜底 opencli_resolve.py —— 真实浏览器打开视频页。
+     数据最全（动图/音乐/码率都有），但慢（~6 秒）且依赖常驻登录 Chrome。
 
-端点: GET /parse?url=<分享链接或视频ID>            （自动双通道）
+调度策略（_handle_parse）：
+  - 视频：SSR 命中即返回（3 秒，直链/标题/作者/封面/互动数据都够用）
+  - 图文/动图：SSR 只用来判断「是不是图文」，判定为图文后继续走浏览器兜底
+    补全动图标记与音乐（SSR 判断不了动图，不能直接返回）
+
+端点: GET /parse?url=<分享链接或视频ID>            （自动多通道）
+      GET /parse?url=...&mode=ssr                  （只走 SSR）
       GET /parse?url=...&mode=api                  （只走接口）
       GET /parse?url=...&mode=browser              （只走浏览器兜底）
       GET /cookie/check?cookie=<cookie>
@@ -22,6 +32,14 @@ PORT = 3008
 BASE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(BASE, 'resolve.py')
 PY = sys.executable
+
+# SSR 通道在进程内直接 import（同容器、同解释器，省一次进程启动）
+sys.path.insert(0, BASE)
+try:
+    import ssr_resolve
+except Exception as _e:                                    # pragma: no cover
+    ssr_resolve = None
+    print(f'[warn] SSR 通道不可用: {_e}', file=sys.stderr)
 
 # 浏览器兜底：opencli 只能跑在宿主机（要连宿主机 Chrome + 抖音登录态），
 # 容器内没有 Chrome/opencli，所以通过这个地址转发。
@@ -66,7 +84,13 @@ class Handler(BaseHTTPRequestHandler):
         return bool(result.get('ok')), result
 
     def _format(self, data):
-        """把内部数据结构转成 wxtools 前端期望的格式"""
+        """把内部数据结构转成 wxtools 前端期望的格式
+
+        ⚠️ duration 的单位两条通道不一致：
+           - opencli/接口通道给的是**毫秒**（> 1000 才除）
+           - SSR 通道在 _build_item 里已经除成**秒**了
+        所以这里按值判断：> 1000 视为毫秒转秒，否则原样用。
+        """
         itype = data.get('type', 'video')
         dur = data.get('duration') or 0
         resp = {
@@ -145,35 +169,76 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {'code': 400, 'message': '缺少 url 参数', 'data': None})
             return
 
+        # ---- 通道 1：SSR（纯 HTTP，实测 3 秒）----
+        #
+        # 返回条件（2026-09-19 改）：
+        #   - 视频：有 videoUrl 就返回
+        #   - 图文：有 images 就返回（能拿到图就直接给，不必等浏览器）
+        #
+        # ⚠️ 图文/动图的作品里，video.play_addr 塞的是**背景音乐 mp3**，
+        #    ssr_resolve 已在那边拦掉（不会吐成 videoUrl），这里判类型只看
+        #    type 字段，不再用「videoUrl 非空」反推。
+        #
+        # ⚠️ 仍然只有「SSR 拿不到动图标记」这一个短板：SSR 返回的图文
+        #    没有 live_photo_type，所以实况照片会退化成静态图。要动图就
+        #    显式指定 mode=browser。
         api_error = ''
-        # ---- 通道 1：接口 ----
+        if mode in ('auto', 'ssr') and ssr_resolve is not None:
+            try:
+                t0 = time.time()
+                ssr = ssr_resolve.resolve(url)
+                dt = round(time.time() - t0, 2)
+                stype = ssr.get('type')
+                usable = (stype == 'video' and ssr.get('videoUrl')) or \
+                         (stype == 'images' and ssr.get('images'))
+                if usable:
+                    extra = ''
+                    if stype == 'images':
+                        extra = ('，无动图标记' if not ssr.get('isLivePhoto')
+                                 else f'，{ssr.get("liveCount")} 个动图')
+                    log.info(f'[parse] SSR 通道成功（{dt}s，{stype}{extra}）')
+                    self._send_json(200, {'code': 200, 'message': 'success',
+                                          'data': self._format(ssr)})
+                    return
+                log.info(f'[parse] SSR 判定为 {stype} 但数据不全，'
+                         f'继续走浏览器兜底补全')
+            except Exception as e:
+                api_error = f'SSR 通道失败: {e}'
+                log.info(f'[parse] SSR 通道失败: {e}')
+
+        if mode == 'ssr':
+            self._send_json(500, {'code': 500,
+                                  'message': api_error or 'SSR 解析失败', 'data': None})
+            return
+
+        # ---- 通道 2：接口（已失效，保留兼容 mode=api）----
         if mode in ('auto', 'api'):
-            args = [SCRIPT]
+            args = []
             if cookie:
                 args += ['--cookie', cookie]
             args.append(url)
             try:
-                ok, result = self._run_script(SCRIPT, args[1:], timeout=120)
+                ok, result = self._run_script(SCRIPT, args, timeout=120)
                 if ok:
                     log.info('[parse] 接口通道成功')
                     self._send_json(200, {'code': 200, 'message': 'success',
                                           'data': self._format(result['data'])})
                     return
-                api_error = result.get('error', '')
+                api_error = result.get('error', '') or api_error
                 log.info(f'[parse] 接口通道失败: {api_error}')
             except subprocess.TimeoutExpired:
-                api_error = '解析超时'
+                api_error = api_error or '解析超时'
                 log.info('[parse] 接口通道超时')
             except Exception as e:
-                api_error = f'内部错误: {e}'
+                api_error = api_error or f'内部错误: {e}'
                 log.warning(f'[parse] 接口通道异常: {e}')
 
             if mode == 'api':
                 self._send_json(500, {'code': 500, 'message': api_error or '解析失败', 'data': None})
                 return
 
-        # ---- 通道 2：浏览器兜底 ----
-        if mode == 'browser' or self._fallback_reason(api_error):
+        # ---- 通道 3：浏览器兜底 ----
+        if mode == 'browser' or self._fallback_reason(api_error) or mode == 'auto':
             log.info(f'[parse] 尝试浏览器兜底（{BROWSER_HOST}）')
             ok, payload = self._call_browser_fallback(url)
             if ok:

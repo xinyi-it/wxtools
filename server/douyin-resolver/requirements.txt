@@ -5,3 +5,5 @@
 f2==0.0.1.7
 browser-cookie3==0.20.1
 httpx
+# SSR 通道（ssr_resolve.py）依赖 requests 打 iesdouyin 分享页
+requests

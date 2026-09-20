@@ -37,6 +37,15 @@ DEFAULT_SESSION = os.environ.get('OPENCLI_SESSION', 'dy')
 # 关标签是异步的，不等会给下一条解析埋 10 秒以上的尾部波动。
 TAB_RELEASE_WAIT = float(os.environ.get('TAB_RELEASE_WAIT', '0.3'))
 
+# 单次探测的超时（秒）。⚠️ 这个必须**短** —— 见 _probe_once/_resolve_in_tab 注释：
+# opencli 通道在页面加载时会被反复堵住，长超时会把随后的空闲窗口一起吃掉，
+# 越等越慢。短超时 + 立刻重抢反而稳定命中（实测 3/3，1.7~2.6 秒）。
+PROBE_TIMEOUT = float(os.environ.get('PROBE_TIMEOUT', '3.5'))
+
+# 探测失败后到下次重试之间的间隔（秒）。同样要**极短** ——
+# 通道堵塞是瞬时的，窗口随时会开，等太久窗口就过去了。
+PROBE_RETRY_GAP = float(os.environ.get('PROBE_RETRY_GAP', '0.15'))
+
 
 def extract_video_id(text: str):
     text = (text or '').strip()
@@ -147,7 +156,7 @@ def _tab_close(session: str, tid):
         pass
 
 
-def _eval_in_tab(session: str, tid, js: str, timeout=45):
+def _eval_in_tab(session: str, tid, js: str, timeout: int = 45):
     """在指定标签页里执行 JS；tid 为 None 时退回当前标签"""
     args = ['browser', session, 'eval', js]
     if tid:
@@ -230,7 +239,7 @@ def _dedup_images(imgs):
     return out
 
 
-def _probe_once(session: str, vid: str, tid=None) -> dict:
+def _probe_once(session: str, vid: str, tid=None, timeout=None) -> dict:
     """一次往返同时取「detail 接口数据」+「DOM 播放器直链」
 
     为什么要合并成一次：
@@ -319,7 +328,7 @@ def _probe_once(session: str, vid: str, tid=None) -> dict:
         "collects:(a.statistics||{}).collect_count||0});"
         "}catch(e){return JSON.stringify({ok:false,err:String(e)});}})()"
     )
-    out = _eval_in_tab(session, tid, js, timeout=45)
+    out = _eval_in_tab(session, tid, js, timeout=timeout or PROBE_TIMEOUT)
     d = _pick_source_json(out)
     return d if isinstance(d, dict) else {}
 
@@ -473,6 +482,22 @@ def _resolve_in_tab(url: str, vid: str, session: str, tid, navigated: bool = Fal
     #    也就是说：紧接着第一次失败后立刻重试，正好撞在页面最忙的时刻。
     #    正确做法是失败后**等页面喘口气**（间隔递增），既不错过干净窗口，
     #    也不在高峰上硬撞。实测这样视频从 104~187s 降到 10 秒内。
+    # ⚠️ 关键认知四（最大的一处浪费，实测采样出来的）：
+    #    opencli 的 eval 通道在页面加载期间会被**反复堵住**，一堵就是 12~45 秒。
+    #    密集采样页面打开后的 157 秒：
+    #      @  1.4s 本轮 1.40s  ok=false    ← 页面刚开，通道空闲
+    #      @ 14.0s 本轮12.08s  TIMEOUT     ← 撞上堵塞
+    #      @ 19.2s 本轮 4.69s  ok=true     ← 数据拿到了，就在这个窗口
+    #      @ 31.7s 之后全部 12.02s TIMEOUT
+    #
+    #    也就是说：**长超时是自伤** —— 傻等 12 秒/45 秒，正好把后面那个空闲
+    #    窗口一起吃掉。改成「短超时快速试探」立刻见效：
+    #      长超时（12~45s）: 偶尔 2.4s，经常 45s 超时，方差 19 倍
+    #      短超时（3.5s）:   3/3 全命中，1.74 / 2.17 / 2.6 秒
+    #
+    #    所以这里用 PROBE_TIMEOUT 的短超时 + 极短间隔重试抢空闲窗口。
+    #    先探一次（页面刚开时通道往往正空闲，能 2 秒内命中），
+    #    失败后用 0.15 秒间隔继续抢，而不是拉长等待让出窗口。
     deadline = time.time() + 60
     detail = {}
     meta = {}
@@ -480,17 +505,12 @@ def _resolve_in_tab(url: str, vid: str, session: str, tid, navigated: bool = Fal
     slide_images = []
     is_slides = False
     dom_deadline = time.time() + 90   # 仅当接口没给直链时才启用
-    wait_next = 0.5                   # 首轮不额外等：导航后立刻试一次
 
     while time.time() < deadline:
-        if wait_next:
-            time.sleep(wait_next)
+        probe = _probe_once(session, vid, tid, timeout=PROBE_TIMEOUT)
 
-        probe = _probe_once(session, vid, tid)
-
-        # 超时/异常返回的不是 dict：说明页面正忙，拉长间隔再试，别硬撞
+        # 超时/异常返回的不是 dict：通道被堵了，立刻重抢（不 sleep 让窗口）
         if not isinstance(probe, dict):
-            wait_next = min(wait_next * 2 if wait_next else 2.0, 6.0)
             continue
 
         if probe.get('ok'):
@@ -526,8 +546,8 @@ def _resolve_in_tab(url: str, vid: str, session: str, tid, navigated: bool = Fal
                 sources = [src]
                 break
 
-        # 本轮通了但还差东西（如接口通了但直链没到）：稍等再试
-        wait_next = 1.0 if not wait_next else min(wait_next + 0.5, 3.0)
+        # 本轮通了但还差东西（如接口通了但直链没到）：极短间隔再抢一次
+        time.sleep(PROBE_RETRY_GAP)
 
     # 统一成后面代码期望的字段名
     meta['title'] = detail.get('desc') or ''

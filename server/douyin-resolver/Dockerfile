@@ -15,7 +15,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制解析服务代码
-COPY resolve.py http_server.py ./
+# ⚠️ opencli_resolve.py 是浏览器兜底通道，必须一起拷进来。
+#    之前漏掉过，导致容器重建后兜底静默失效（接口被风控后解析全挂）。
+COPY resolve.py http_server.py opencli_resolve.py ./
 
 # 创建非 root 用户运行
 RUN useradd -m -u 1000 user && chown -R user:user /app

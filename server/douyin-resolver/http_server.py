@@ -81,6 +81,7 @@ class Handler(BaseHTTPRequestHandler):
                 'likes': data.get('likes', 0),
                 'comments': data.get('comments', 0),
                 'shares': data.get('shares', 0),
+                'collects': data.get('collects', 0),
             },
         }
         if itype == 'images':

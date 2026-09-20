@@ -107,6 +107,47 @@ def resolve_by_opencli(target: str, session: str = DEFAULT_SESSION, retries: int
     raise last_err if last_err else RuntimeError('解析失败')
 
 
+def _parse_wan(s: str) -> int:
+    """把「7.9万」「6027」这类计数文本转成整数"""
+    s = (s or '').strip().replace(',', '')
+    if not s:
+        return 0
+    try:
+        if s.endswith('万'):
+            return int(float(s[:-1]) * 10000)
+        if s.endswith('亿'):
+            return int(float(s[:-1]) * 100000000)
+        return int(float(s))
+    except Exception:
+        return 0
+
+
+def _parse_stats(info: str) -> dict:
+    """从 detail-video-info 文本里抠出互动数据
+
+    文本形如：
+      文案...#话题
+      7.9万      <- 点赞
+      6027       <- 评论
+      9476       <- 收藏
+      1.1万      <- 分享
+      举报
+    前 4 行数字即为 赞/评/藏/转（顺序与页面一致）。
+    """
+    out = {'likes': 0, 'comments': 0, 'shares': 0, 'collects': 0}
+    lines = [l.strip() for l in (info or '').splitlines() if l.strip()]
+    nums = []
+    for l in lines:
+        if re.fullmatch(r'[\d.,]+[万亿]?', l):
+            nums.append(l)
+        if len(nums) >= 4:
+            break
+    keys = ['likes', 'comments', 'collects', 'shares']
+    for k, v in zip(keys, nums):
+        out[k] = _parse_wan(v)
+    return out
+
+
 def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
     url = (target or '').strip()
     m = re.search(r'https?://\S+', url)
@@ -142,21 +183,42 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
         time.sleep(3)
         raw = _run_opencli([
             'browser', session, 'eval',
+            # 元数据提取（选择器均在真实页面验证过）：
+            #   title  —— document.title
+            #   author —— [data-e2e="user-info"] 里指向 /user/ 的链接文本
+            #             （页面上真正有文字的锚点，旧的 video-author-name 已失效）
+            #   cover  —— 播放器容器的 background-image（440x330，正是本作品封面）
+            #             video 标签没设 poster，必须走背景图这条路
+            #   stat   —— detail-video-info 的文本行，按顺序是 赞/评/藏/转
             "JSON.stringify({src:[...document.querySelectorAll('video source')].map(s=>s.src),"
             "cur:[...document.querySelectorAll('video')].map(v=>v.currentSrc),"
             "title:document.title,"
-            "author:(document.querySelector('[data-e2e=\"video-author-name\"]')||{}).innerText||'',"
-            "poster:(document.querySelector('video')||{}).poster||'',"
+            "author:(()=>{const el=document.querySelector('[data-e2e=\"user-info\"]');"
+            "if(!el)return '';"
+            "const a=[...el.querySelectorAll('a[href*=\"/user/\"]')].find(x=>x.innerText.trim());"
+            "if(a)return a.innerText.trim();"
+            # 兜底：整块文本第一段（形如「昵称粉丝xx获赞xx」）
+            "const t=el.innerText.trim();"
+            "const mm=t.match(/^(.+?)(粉丝|获赞|关注)/);"
+            "return mm?mm[1].trim():'';})(),"
+            "cover:(()=>{const c=document.querySelector('[data-e2e=\"player-container\"]');"
+            "if(c){for(const e of c.querySelectorAll('*')){"
+            "const bg=e.style&&e.style.backgroundImage;"
+            "if(bg&&bg.includes('http'))return bg.replace(/^url\\([\"\\']?/,'').replace(/[\"\\']?\\)$/,'');}}"
+            "return '';})(),"
             "dur:(document.querySelector('video')||{}).duration||0,"
             # 图文笔记：轮播图容器内的 img
             "slides:[...document.querySelectorAll('[data-e2e=\"slides-item\"] img, .swiper-slide img, [class*=slides] img')]"
-            ".map(i=>i.src).filter(s=>s&&s.startsWith('http'))})"
+            ".map(i=>i.src).filter(s=>s&&s.startsWith('http')),"
+            # 互动数据行
+            "info:(()=>{const el=document.querySelector('[data-e2e=\"detail-video-info\"]');"
+            "return el?el.innerText.trim():'';})()})"
         ], timeout=60)
         data = _pick_source_json(raw)
         if isinstance(data, dict):
             meta = data
             # 记录信息最全的一份（作者/封面/时长可能要等页面渲染完才有）
-            if data.get('author') or data.get('dur'):
+            if data.get('author') or data.get('dur') or data.get('cover'):
                 best_meta = data
             srcs = [s for s in (data.get('src') or []) if s and s.startswith('http')]
             if srcs:
@@ -167,8 +229,8 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
                 slide_images = imgs
                 is_slides = True
                 break
-            # 拿到直链后，若元数据已齐则提前退出，否则再等一轮补齐
-            if data.get('author') and data.get('dur'):
+            # 元数据齐了就提前退出（作者+封面+时长都有），不必耗满 45 秒
+            if data.get('author') and data.get('dur') and data.get('cover'):
                 break
 
     # 合并元数据：优先用信息更全的那份
@@ -193,17 +255,20 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
             uniq.append(u)
         if not uniq:
             raise RuntimeError('图文笔记未取到图片（Chrome 未登录抖音，或页面未渲染）')
+        st = _parse_stats(meta.get('info') or '')
         return {
             'id': vid,
             'type': 'images',
             'title': title,
             'author': (meta.get('author') or '').strip(),
-            'cover': uniq[0],
+            # 封面优先用页面上的（已带签名，最准）；没有再退回第一张图
+            'cover': (meta.get('cover') or '').strip() or uniq[0],
             'musicUrl': '',
             'duration': 0,
-            'likes': 0,
-            'comments': 0,
-            'shares': 0,
+            'likes': st['likes'],
+            'comments': st['comments'],
+            'shares': st['shares'],
+            'collects': st['collects'],
             'images': uniq,
             'imageCount': len(uniq),
             'source': 'opencli',
@@ -229,17 +294,20 @@ def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
     except Exception:
         dur_ms = 0
 
+    st = _parse_stats(meta.get('info') or '')
+
     return {
         'id': vid,
         'type': 'video',
         'title': title,
         'author': (meta.get('author') or '').strip(),
-        'cover': meta.get('poster') or '',
+        'cover': (meta.get('cover') or '').strip(),
         'musicUrl': '',
         'duration': dur_ms,
-        'likes': 0,
-        'comments': 0,
-        'shares': 0,
+        'likes': st['likes'],
+        'comments': st['comments'],
+        'shares': st['shares'],
+        'collects': st['collects'],
         'videoUrl': picked,
         'videoUrls': sources,
         'source': 'opencli',

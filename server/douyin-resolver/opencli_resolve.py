@@ -84,7 +84,30 @@ def _pick_source_json(out: str):
         return None
 
 
-def resolve_by_opencli(target: str, session: str = DEFAULT_SESSION) -> dict:
+def resolve_by_opencli(target: str, session: str = DEFAULT_SESSION, retries: int = 2) -> dict:
+    """解析（带重试）
+
+    抖音页面偶发不吐播放器（渲染慢、风控抽风），单次失败不代表链接有问题，
+    所以失败后重新打开页面再试，实测重试一次基本都能成。
+    """
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            return _resolve_once(target, session)
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                # 重试前重开一次页面，别在同一个坏状态上反复读
+                try:
+                    _run_opencli(['browser', session, 'eval', 'location.reload()'], timeout=30)
+                except Exception:
+                    pass
+                import time as _t
+                _t.sleep(3)
+    raise last_err if last_err else RuntimeError('解析失败')
+
+
+def _resolve_once(target: str, session: str = DEFAULT_SESSION) -> dict:
     url = (target or '').strip()
     m = re.search(r'https?://\S+', url)
     if m:
@@ -105,11 +128,16 @@ def resolve_by_opencli(target: str, session: str = DEFAULT_SESSION) -> dict:
         pass
 
     # 2) 等播放器渲染（短视频一般 3-6 秒）
+    #    页面类型要一起探：视频读 <video><source>，图文笔记（slides）页面没有播放器，
+    #    硬等只会白耗 45 秒，所以探到 slides 就立刻转去抓图片。
     import time
     deadline = time.time() + 45
     sources = []
     meta = {}
     best_meta = {}
+    slide_images = []
+    is_slides = False
+
     while time.time() < deadline:
         time.sleep(3)
         raw = _run_opencli([
@@ -119,7 +147,10 @@ def resolve_by_opencli(target: str, session: str = DEFAULT_SESSION) -> dict:
             "title:document.title,"
             "author:(document.querySelector('[data-e2e=\"video-author-name\"]')||{}).innerText||'',"
             "poster:(document.querySelector('video')||{}).poster||'',"
-            "dur:(document.querySelector('video')||{}).duration||0})"
+            "dur:(document.querySelector('video')||{}).duration||0,"
+            # 图文笔记：轮播图容器内的 img
+            "slides:[...document.querySelectorAll('[data-e2e=\"slides-item\"] img, .swiper-slide img, [class*=slides] img')]"
+            ".map(i=>i.src).filter(s=>s&&s.startsWith('http'))})"
         ], timeout=60)
         data = _pick_source_json(raw)
         if isinstance(data, dict):
@@ -130,9 +161,15 @@ def resolve_by_opencli(target: str, session: str = DEFAULT_SESSION) -> dict:
             srcs = [s for s in (data.get('src') or []) if s and s.startswith('http')]
             if srcs:
                 sources = srcs
-                # 拿到直链后，若元数据已齐则提前退出，否则再等一轮补齐
-                if data.get('author') and data.get('dur'):
-                    break
+            # 探到图文图片 -> 不是视频页，立刻收工
+            imgs = [s for s in (data.get('slides') or []) if s and s.startswith('http')]
+            if imgs and not srcs:
+                slide_images = imgs
+                is_slides = True
+                break
+            # 拿到直链后，若元数据已齐则提前退出，否则再等一轮补齐
+            if data.get('author') and data.get('dur'):
+                break
 
     # 合并元数据：优先用信息更全的那份
     merged = dict(meta)
@@ -140,6 +177,37 @@ def resolve_by_opencli(target: str, session: str = DEFAULT_SESSION) -> dict:
         if v and not merged.get(k):
             merged[k] = v
     meta = merged
+
+    # ---------- 图文笔记分支 ----------
+    # 图文没有播放地址，走图片列表返回（结构对齐 resolve.py 的 type=images）
+    if is_slides and not sources:
+        title = re.sub(r'\s*-\s*抖音\s*$', '', (meta.get('title') or '').strip())
+        # 去掉重复图（同一张图常有多种尺寸后缀）
+        seen = set()
+        uniq = []
+        for u in slide_images:
+            key = re.sub(r'~\w+\.(jpe?g|png|webp|heic)', '', u)
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(u)
+        if not uniq:
+            raise RuntimeError('图文笔记未取到图片（Chrome 未登录抖音，或页面未渲染）')
+        return {
+            'id': vid,
+            'type': 'images',
+            'title': title,
+            'author': (meta.get('author') or '').strip(),
+            'cover': uniq[0],
+            'musicUrl': '',
+            'duration': 0,
+            'likes': 0,
+            'comments': 0,
+            'shares': 0,
+            'images': uniq,
+            'imageCount': len(uniq),
+            'source': 'opencli',
+        }
 
     if not sources:
         # 退一步：看看 currentSrc 里有没有非 blob 的可用地址
